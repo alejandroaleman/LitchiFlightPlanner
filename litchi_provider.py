@@ -12,4 +12,6 @@ class LitchiProvider(QgsProcessingProvider):
         return 'Litchi Converter'
 
     def icon(self):
-        return QgsProcessingProvider.icon(self)
+        import os
+        from qgis.PyQt.QtGui import QIcon
+        return QIcon(os.path.join(os.path.dirname(__file__), 'plugin.png'))
