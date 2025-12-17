@@ -22,7 +22,8 @@ from qgis.core import (QgsProcessing,
                        QgsVectorLayer,
                        QgsProject,
                        QgsCoordinateReferenceSystem,
-                       QgsCoordinateTransform)
+                       QgsCoordinateTransform,
+                       QgsDistanceArea)
 import math
 
 class LitchiFormatterAlgorithm(QgsProcessingAlgorithm):
@@ -62,6 +63,15 @@ class LitchiFormatterAlgorithm(QgsProcessingAlgorithm):
                 self.INPUT,
                 self.tr('Input vector layer'),
                 types=[QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                'CENTROIDS',
+                self.tr('Centroids Layer (for interval calc)'),
+                types=[QgsProcessing.TypeVectorPoint],
+                optional=True
             )
         )
         
@@ -112,7 +122,35 @@ class LitchiFormatterAlgorithm(QgsProcessingAlgorithm):
         transform = QgsCoordinateTransform(source_crs, target_crs, context.project())
 
         speed = self.parameterAsDouble(parameters, self.SPEED, context)
-        photo_distinterval = self.parameterAsDouble(parameters, self.PHOTO_DISTINTERVAL, context)
+        photo_distinterval_param = self.parameterAsDouble(parameters, self.PHOTO_DISTINTERVAL, context)
+        
+        # Interval Calculation Logic
+        centroids_layer = self.parameterAsSource(parameters, 'CENTROIDS', context)
+        calc_interval = 0
+        
+        if centroids_layer:
+            c_feats = list(centroids_layer.getFeatures())
+            if len(c_feats) >= 2:
+                p1 = c_feats[0].geometry().asPoint()
+                p2 = c_feats[1].geometry().asPoint()
+                # Measure distance. If source CRS is projected, simple euclidean is fine (and matches what FP used presumably).
+                # If source is geographic, we should use QgsDistanceArea.
+                # Assuming generic euclidean distance on the source units is what is desired here (matching pixel overlap logic).
+                # To be robust, let's use QgsDistanceArea if possible, but simple sqrt ok for now if projected.
+                # Safest generic way in QGIS API:
+                d = QgsDistanceArea()
+                d.setSourceCrs(centroids_layer.sourceCrs(), context.project().transformContext())
+                calc_interval = d.measureLine(p1, p2)
+
+        # Logic: If parameter is 0, use calculated. If parameter > 0, override.
+        # If calculation failed (0) and parameter is 0, default to 40? Or let it be 0.
+        if photo_distinterval_param > 0:
+            photo_distinterval = photo_distinterval_param
+        elif calc_interval > 0:
+            photo_distinterval = calc_interval
+        else:
+             photo_distinterval = 40.0 # Fallback default
+
 
         fields = [
             QgsField('latitude', QMetaType.Type.Double),
