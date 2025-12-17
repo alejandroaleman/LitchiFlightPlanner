@@ -20,7 +20,9 @@ from qgis.core import (QgsProcessing,
                        QgsFeature,
                        QgsFeatureSink,
                        QgsVectorLayer,
-                       QgsProject)
+                       QgsProject,
+                       QgsCoordinateReferenceSystem,
+                       QgsCoordinateTransform)
 import math
 
 class LitchiFormatterAlgorithm(QgsProcessingAlgorithm):
@@ -105,15 +107,10 @@ class LitchiFormatterAlgorithm(QgsProcessingAlgorithm):
         if input_layer is None:
             raise QgsProcessingException(self.invalidSourceError(parameters, self.INPUT))
 
-        crs = input_layer.sourceCrs() # Better to get CRS from source
-        # Alternatively use parameterAsCrs if we had that param, but we don't.
-        # Original code: crs = self.parameterAsCrs(parameters, 'INPUT', context) -> wait, 'INPUT' is Source, not CRS param.
-        # Correct way for Source is input_layer.sourceCrs() usually, logic check:
-        # Original code line 142: crs = self.parameterAsCrs(parameters, 'INPUT', context) -> This looks wrong in original too if INPUT provides a source.
-        # But parameterAsCrs usually expects a Crs parameter. However, maybe it works if passing a source param name?
-        # Let's check documentation or common practice. Usually we take it from source.
-        # I will trust the original script worked? Or maybe not. Let's stick to safer `input_layer.sourceCrs()`.
-        
+        source_crs = input_layer.sourceCrs()
+        target_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        transform = QgsCoordinateTransform(source_crs, target_crs, context.project())
+
         speed = self.parameterAsDouble(parameters, self.SPEED, context)
         photo_distinterval = self.parameterAsDouble(parameters, self.PHOTO_DISTINTERVAL, context)
 
@@ -136,25 +133,14 @@ class LitchiFormatterAlgorithm(QgsProcessingAlgorithm):
             QgsField('photo_distinterval', QMetaType.Type.Double)
         ]
 
-        # Use 'memory' layer for temporary output
-        # But wait, QgsProcessingOutputVectorLayer usually expects us to return a sink or a layer ID string.
-        # In QGIS 3 Processing, we usually use self.parameterAsSink.
-        # The original script uses QgsVectorLayer("memory") and QgsProject.instance().addMapLayer(output_layer).
-        # That is NOT standard Processing Algorithm behavior (adds to project directly, bypassing processing framework handling).
-        # Standard way: use 'sink'.
-        
-        # However, to minimize friction with existing logic, I will implement it as standard sink if possible, 
-        # OR keep it as is if user wants exactly that behavior.
-        # The original script returned {'OUTPUT': output_layer.id()}.
-        # Let's try to improve it to use parameterAsSink which is robust.
-        
+        # Use WGS84 for the output layer
         (sink, dest_id) = self.parameterAsSink(
             parameters,
             self.OUTPUT,
             context,
             fields,
             input_layer.wkbType(),
-            input_layer.sourceCrs()
+            target_crs 
         )
         
         if sink is None:
@@ -162,60 +148,89 @@ class LitchiFormatterAlgorithm(QgsProcessingAlgorithm):
 
         features = list(input_layer.getFeatures())
         
-        ycoord_idx = input_layer.fields().indexOf('ycoord')
-        xcoord_idx = input_layer.fields().indexOf('xcoord')
+        # We only need altitude from attributes now.
         altitude_idx = input_layer.fields().indexOf('Alt. ASL [m]')
-        
-        # Verification of fields
-        if ycoord_idx == -1 or xcoord_idx == -1: 
-             # Fallback to geometry if fields missing? or error?
-             # features might use geometry directly.
-             # Origin script assumes specific fields. I'll keep it.
-             pass
 
         for i in range(len(features)):
             feature = features[i]
             
-            # Logic from original script
+            # Helper to get transformed point (lat, lon) for any index
+            def get_pt(idx):
+                feat = features[idx]
+                geom = feat.geometry()
+                if not geom:
+                    return 0, 0
+                pt = geom.asPoint()
+                tr_pt = transform.transform(pt)
+                return tr_pt.y(), tr_pt.x()
+
+            current_lat, current_lon = get_pt(i)
+
+            # Pairing logic for Heading
+            # If current index is even (0, 2, 4...), pairing with next (i+1)
+            # If current index is odd (1, 3, 5...), pairing with prev (i-1)
+            # The direction is always EVEN -> ODD.
+            
+            lat1, lon1, lat2, lon2 = 0, 0, 0, 0
+            
             if i % 2 == 0:
+                # Even: Start of line. Heading is towards next point.
                 if i + 1 < len(features):
-                    feature2 = features[i + 1]
-                    lat1, lon1 = feature[ycoord_idx], feature[xcoord_idx]
-                    lat2, lon2 = feature2[ycoord_idx], feature2[xcoord_idx]
+                    lat1, lon1 = current_lat, current_lon
+                    lat2, lon2 = get_pt(i+1)
                 else: 
-                     # fallback if odd number of points?
-                     lat1, lon1 = feature[ycoord_idx], feature[xcoord_idx]
-                     lat2, lon2 = lat1, lon1 # No movement
+                     # Orphan point at end? Maintain previous behavior or 0.
+                     lat1, lon1 = current_lat, current_lon
+                     lat2, lon2 = current_lat, current_lon
             else:
+                # Odd: End of line. Heading is SAME as previous point (from prev to this).
+                # Logic in original script:
+                # feature2 = features[i - 1]
+                # lat1, lon1 = feature2...
+                # lat2, lon2 = feature...
                 if i - 1 >= 0:
-                    feature2 = features[i - 1]
-                    lat1, lon1 = feature2[ycoord_idx], feature2[xcoord_idx]
-                    lat2, lon2 = feature[ycoord_idx], feature[xcoord_idx]
+                    lat1, lon1 = get_pt(i-1)
+                    lat2, lon2 = current_lat, current_lon
                 else:
-                    lat1, lon1 = feature[ycoord_idx], feature[xcoord_idx]
-                    lat2, lon2 = lat1, lon1
+                    # Should not happen for odd index
+                    lat1, lon1 = current_lat, current_lon
+                    lat2, lon2 = current_lat, current_lon
 
             bearing_value = self.calculate_bearing(lat1, lon1, lat2, lon2)
 
             new_feature = QgsFeature()
-            new_feature.setGeometry(feature.geometry())
+            # Reuse geometry? Need to ensure it is transformed if we want output to be 4326.
+            # sink is initialized with target_crs (4326).
+            # So we must write 4326 geometry.
+            
+            orig_geom = feature.geometry()
+            if orig_geom:
+                 orig_pt = orig_geom.asPoint()
+                 tr_pt = transform.transform(orig_pt)
+                 new_geom = type(orig_geom).fromPointXY(tr_pt) # Reconstruct geometry
+                 new_feature.setGeometry(new_geom)
+            
+            # Use 'Alt. ASL [m]' if present, else 0 or maybe z from geometry?
+            # Sticking to attribute as per legacy behavior.
+            alt_val = feature[altitude_idx] if altitude_idx != -1 else 0
+
             new_feature.setAttributes([
-                feature[ycoord_idx],
-                feature[xcoord_idx],
-                feature[altitude_idx] if altitude_idx != -1 else 0,
-                bearing_value,
-                0.02,  # Curvesize
-                0,  # Rotation Direction
-                0,  # Gimbal Mode
-                -90,  # Gimbal Pitch Angle
-                1,  # Altitude Mode
-                speed,
-                0,  # POI Latitude
-                0,  # POI Longitude
-                0,  # POI Altitude
-                0,  # POI Altitude Mode
-                0,  # Photo Time Interval
-                photo_distinterval  # Photo Distance Interval
+                current_lat,        # latitude
+                current_lon,        # longitude
+                alt_val,            # altitude(m)
+                bearing_value,      # heading(deg)
+                0.02,               # curvesize(m)
+                0,                  # rotationdir
+                0,                  # gimbalmode
+                -90,                # gimbalpitchangle
+                1,                  # altitudemode
+                speed,              # speed(m/s)
+                0,                  # poi_latitude
+                0,                  # poi_longitude
+                0,                  # poi_altitude(m)
+                0,                  # poi_altitudemode
+                0,                  # photo_timeinterval
+                photo_distinterval  # photo_distinterval
             ])
             sink.addFeature(new_feature, QgsFeatureSink.FastInsert)
 
