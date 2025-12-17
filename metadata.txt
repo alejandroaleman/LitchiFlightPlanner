@@ -1,0 +1,12 @@
+[general]
+name=Litchi Mission Formatter
+qgisMinimumVersion=3.0
+description=Converts Flight Planner output to Litchi mission CSV.
+version=0.1
+author=Your Name
+email=your.email@example.com
+about=Plugin to convert flight plans for Litchi.
+tracker=
+repository=
+tags=processing, litchi, drone
+experimental=True
