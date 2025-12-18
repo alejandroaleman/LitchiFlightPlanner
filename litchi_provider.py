@@ -1,11 +1,11 @@
 from qgis.core import QgsProcessingProvider
-from .litchi_algorithm import LitchiFormatterAlgorithm
 from .litchi_generator import LitchiGeneratorAlgorithm
+from .litchi_add_camera import LitchiAddCameraAlgorithm
 
 class LitchiProvider(QgsProcessingProvider):
     def loadAlgorithms(self, *args, **kwargs):
-        self.addAlgorithm(LitchiFormatterAlgorithm())
         self.addAlgorithm(LitchiGeneratorAlgorithm())
+        self.addAlgorithm(LitchiAddCameraAlgorithm())
 
     def id(self):
         return 'litchiconverter'

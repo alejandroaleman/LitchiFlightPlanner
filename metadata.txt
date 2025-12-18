@@ -1,12 +1,12 @@
 [general]
 name=Flight Planner for Litchi Missions
 qgisMinimumVersion=3.0
-description=Converts Flight Planner output to Litchi mission CSV.
-version=0.1
+description=Professional Photogrammetry Flight Planner for Litchi (GSD-based).
+version=0.1.0
 author=Alejandro Aleman
 email=janoaleman@gmail.com
-about=QGIS Processing Plugin to convert Flight Planner outputs to Litchi Mission CSV.
-tracker=https://github.com/alejandroaleman/Litchi_converter/issues
-repository=https://github.com/alejandroaleman/Litchi_converter
-tags=processing, litchi, drone
+about=Generates grid-based flight missions for Litchi based on AOI, Camera specs, and GSD. Includes advanced geometric filtering and preview layer generation.
+tracker=https://github.com/alejandroaleman/LitchiFlightPlanner/issues
+repository=https://github.com/alejandroaleman/LitchiFlightPlanner
+tags=processing, litchi, drone, photogrammetry, flight-plan
 experimental=True
