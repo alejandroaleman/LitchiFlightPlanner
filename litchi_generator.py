@@ -54,7 +54,7 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         return 'customscripts'
 
     def shortHelpString(self):
-        return self.tr("Generates a photogrammetry flight plan for Litchi. Outputs: Waypoints (CSV ready), Flight Lines, and Photo Centroids.")
+        return self.tr("Generates a photogrammetry flight plan for Litchi using a Grid-Centric approach. Outputs: Waypoints (CSV ready), Flight Lines, and Photo Centroids.")
 
     def initAlgorithm(self, config=None):
         self.addParameter(
@@ -155,6 +155,7 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         
         combined_geom.transform(tr_to_proj)
         
+        # Apply Buffer on AOI to get a larger coverage
         if buffer_pct > 0:
             size_proxy = math.sqrt(abs(combined_geom.area()))
             buf_dist = size_proxy * buffer_pct
@@ -163,14 +164,71 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         bbox = combined_geom.boundingBox()
         cx, cy = bbox.center().x(), bbox.center().y()
         
-        # Rotation logic
-        rot_angle = heading_angle - 90
+        # GRID GENERATION LOGIC
+        # 1. Rotate AOI by -Heading to align with X/Y axes
+        rot_angle = heading_angle - 90 # If we assume Heading 0 is North (Y). We want to transform to X.
+        # Actually, let's stick to standard math: 
+        # We want to scan along Heading.
+        # Rotating AOI by -Heading aligns Heading to Vertical Y? Or Horizontal X?
+        # Let's say Heading 0 (North). We want lines Vertical.
+        # If we rotate by -0, it's Vertical. We scan X, vary Y. 
+        # But standard algorithms usually scan Rows (Horizontal).
+        # So let's align Heading to X-axis (Horizontal).
+        # Heading 0 (Y). Target (X). Diff is -90.
+        # So Rotate by -90 + Heading? Or Heading - 90?
+        # Angle from X to Y is +90.
+        # Angle from North(Y) to Heading is H.
+        # Total rotation?
+        # Let's use `rot_angle` as the rotation applied to geometry to make lines Horizontal.
+        # If H=0 (North), lines are vertical. We want horizontal. Rotate by 90.
+        # If H=90 (East), lines are horizontal. Rotate by 0.
+        # So Rotation = 90 - H.
+        # Let's verify. H=45. Lines / . Rotate by 45 -> -. Horizontal. Correct.
+        # H=180 (South). Lines |. Rotate by -90? Or 270.
+        
+        rotation_to_horizontal = 90 - heading_angle
         
         geom_rotated = QgsGeometry(combined_geom)
-        geom_rotated.rotate(rot_angle, QgsPointXY(cx, cy))
+        geom_rotated.rotate(rotation_to_horizontal, QgsPointXY(cx, cy))
+        
         r_bbox = geom_rotated.boundingBox()
         
-        # Outputs Setup
+        # 2. Build Grid of Points
+        xs = []
+        ys = []
+        
+        curr_x = r_bbox.xMinimum()
+        while curr_x <= r_bbox.xMaximum():
+            xs.append(curr_x)
+            curr_x += dist_between_photos
+            
+        curr_y = r_bbox.yMinimum()
+        while curr_y <= r_bbox.yMaximum():
+            ys.append(curr_y)
+            curr_y += dist_between_lines
+            
+        # 3. Filter Points
+        # We store valid points in a dict: strips[y_index] = [p1, p2, p3...]
+        # Because floats are messy keys, we use the index i, j
+        strips = {}
+        
+        total_photos = 0
+        
+        for j, y_coord in enumerate(ys):
+            points_in_strip = []
+            for i, x_coord in enumerate(xs):
+                pt = QgsPointXY(x_coord, y_coord)
+                if geom_rotated.contains(QgsGeometry.fromPointXY(pt)):
+                     # It's inside!
+                     points_in_strip.append(pt)
+            
+            if points_in_strip:
+                strips[j] = points_in_strip
+                total_photos += len(points_in_strip)
+
+        feedback.pushInfo(f"Generated {total_photos} photo centroids.")
+
+        # Prepare Sinks
         litchi_fields = QgsFields()
         litchi_fields.append(QgsField('latitude', QMetaType.Type.Double))
         litchi_fields.append(QgsField('longitude', QMetaType.Type.Double))
@@ -190,128 +248,95 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         litchi_fields.append(QgsField('photo_distinterval', QMetaType.Type.Double))
 
         line_fields = QgsFields()
-        line_fields.append(QgsField('id', QMetaType.Type.Int))
+        line_fields.append(QgsField('strip_id', QMetaType.Type.Int))
 
         centroid_fields = QgsFields()
-        centroid_fields.append(QgsField('line_id', QMetaType.Type.Int))
+        centroid_fields.append(QgsField('strip_id', QMetaType.Type.Int))
         centroid_fields.append(QgsField('photo_id', QMetaType.Type.Int))
 
         (sink_litchi, dest_id_litchi) = self.parameterAsSink(parameters, self.OUTPUT_LITCHI, context, litchi_fields, QgsWkbTypes.Point, wgs84)
         (sink_lines, dest_id_lines) = self.parameterAsSink(parameters, self.OUTPUT_LINES, context, line_fields, QgsWkbTypes.LineString, wgs84)
         (sink_cent, dest_id_cent) = self.parameterAsSink(parameters, self.OUTPUT_CENTROIDS, context, centroid_fields, QgsWkbTypes.Point, wgs84)
 
-        current_y = r_bbox.yMinimum() + (dist_between_lines / 2)
-        reverse = False
-        line_count = 0
+        # 4. Process Strips
+        # Sort strips by Key (Y index)
+        sorted_indices = sorted(strips.keys())
         
-        while current_y <= r_bbox.yMaximum():
-            p_start = QgsPointXY(r_bbox.xMinimum() - 1000, current_y)
-            p_end = QgsPointXY(r_bbox.xMaximum() + 1000, current_y)
-            line_geom = QgsGeometry.fromPolylineXY([p_start, p_end])
-            
-            intersection = line_geom.intersection(geom_rotated)
-            
-            if not intersection.isEmpty():
-                 parts = intersection.asGeometryCollection()
-                 for part in parts:
-                      length = part.length()
-                      if length > 0:
-                          line_count += 1
-                          
-                          # 1. Generate Points for this Segment
-                          # Start/End
-                          pt_start_proj = part.startPoint()
-                          pt_end_proj = part.endPoint()
-                          
-                          # Litchi Waypoints Logic
-                          # We need 2 waypoints per line: Start and End.
-                          # Order depends on 'reverse' (Snake pattern).
-                          
-                          if reverse:
-                              wp1_proj = pt_end_proj
-                              wp2_proj = pt_start_proj
-                          else:
-                              wp1_proj = pt_start_proj
-                              wp2_proj = pt_end_proj
-                          
-                          # Transform Logic (Helper)
-                          def transform_back(pt_proj):
-                                # Rotate back around Center
-                                px, py = pt_proj.x() - cx, pt_proj.y() - cy
-                                rad = math.radians(-rot_angle)
-                                nx = px * math.cos(rad) - py * math.sin(rad)
-                                ny = px * math.sin(rad) + py * math.cos(rad)
-                                fx, fy = nx + cx, ny + cy
-                                # To WGS84
-                                return tr_to_wgs84.transform(QgsPointXY(fx, fy))
-                          
-                          wp1_wgs84 = transform_back(wp1_proj)
-                          wp2_wgs84 = transform_back(wp2_proj)
-                          
-                          # Calculate Heading for this pair (WGS84 Azimuth)
-                          # We could use the input 'heading_angle' directly?
-                          # If snake pattern, even lines go Heading, odd lines go Heading + 180.
-                          # Litchi Heading: Direction drone faces. If mapping, usually aligned with flight.
-                          
-                          # Calculate true bearing between wp1 and wp2 in WGS84
-                          d = QgsDistanceArea()
-                          d.setSourceCrs(wgs84, context.project().transformContext())
-                          bearing = d.bearing(wp1_wgs84, wp2_wgs84) 
-                          bearing_deg = math.degrees(bearing)
-                          if bearing_deg < 0: bearing_deg += 360
-                          
-                          # Add Litchi Waypoints
-                          for pt_wgs in [wp1_wgs84, wp2_wgs84]:
-                              f = QgsFeature()
-                              f.setGeometry(QgsGeometry.fromPointXY(pt_wgs))
-                              f.setAttributes([
-                                  pt_wgs.y(), pt_wgs.x(), altitude,
-                                  bearing_deg, # Heading (Coupled)
-                                  0.0, 0, 0, -90, 1, speed, 0,0,0,0,0,
-                                  dist_between_photos
-                              ])
-                              if sink_litchi: sink_litchi.addFeature(f, QgsFeatureSink.FastInsert)
-                          
-                          # 2. Generate Visual Line
-                          if sink_lines:
-                              line_feat = QgsFeature()
-                              line_geom_wgs = QgsGeometry.fromPolylineXY([wp1_wgs84, wp2_wgs84])
-                              line_feat.setGeometry(line_geom_wgs)
-                              line_feat.setAttributes([line_count])
-                              sink_lines.addFeature(line_feat, QgsFeatureSink.FastInsert)
-                          
-                          # 3. Generate Centroids (QC)
-                          if sink_cent:
-                              current_dist = 0
-                              # Interpolate along the projected line part, then transform
-                              # Use correct direction
-                              # part is always min_x to max_x? QgsGeometry intersection result usually ordered.
-                              # If reverse, we need to handle interpolation distance carefully.
-                              
-                              # Easier: Construct a vector from wp1 to wp2
-                              while current_dist <= length:
-                                  # Interpolate on the projected segment?
-                                  # Actually, wp1_proj and wp2_proj are the ends.
-                                  # Vector maths on projected plane
-                                  ratio = current_dist / length
-                                  dx = wp2_proj.x() - wp1_proj.x()
-                                  dy = wp2_proj.y() - wp1_proj.y()
-                                  
-                                  interp_x = wp1_proj.x() + dx * ratio
-                                  interp_y = wp1_proj.y() + dy * ratio
-                                  
-                                  cent_wgs = transform_back(QgsPointXY(interp_x, interp_y))
-                                  
-                                  cf = QgsFeature()
-                                  cf.setGeometry(QgsGeometry.fromPointXY(cent_wgs))
-                                  cf.setAttributes([line_count, int(current_dist/dist_between_photos)])
-                                  sink_cent.addFeature(cf, QgsFeatureSink.FastInsert)
-                                  
-                                  current_dist += dist_between_photos
+        reverse = False
+        
+        def transform_back(pt_proj):
+            # Rotate back around Center
+            px, py = pt_proj.x() - cx, pt_proj.y() - cy
+            # We rotated by 'rotation_to_horizontal'. So we rotate back by -rotation_to_horizontal.
+            rad = math.radians(-rotation_to_horizontal)
+            nx = px * math.cos(rad) - py * math.sin(rad)
+            ny = px * math.sin(rad) + py * math.cos(rad)
+            fx, fy = nx + cx, ny + cy
+            # To WGS84
+            return tr_to_wgs84.transform(QgsPointXY(fx, fy))
 
-            current_y += dist_between_lines
-            reverse = not reverse 
+        for strip_idx in sorted_indices:
+            pts = strips[strip_idx]
+            if not pts: continue
             
+            # Snake logic: if reverse, process points in reverse order?
+            # Actually, the points in 'pts' are sorted by X.
+            # Start/End definition:
+            start_proj = pts[0]
+            end_proj = pts[-1]
+            
+            if reverse:
+                # If flying backwards (Right to Left on map frame), Start is end_proj, End is start_proj
+                wp1_proj = end_proj
+                wp2_proj = start_proj
+                ordered_pts = list(reversed(pts))
+            else:
+                wp1_proj = start_proj
+                wp2_proj = end_proj
+                ordered_pts = pts
+            
+            # Transform Waypoints
+            wp1_wgs = transform_back(wp1_proj)
+            wp2_wgs = transform_back(wp2_proj)
+            
+            # Calculate Heading
+            d = QgsDistanceArea()
+            d.setSourceCrs(wgs84, context.project().transformContext())
+            bearing = d.bearing(wp1_wgs, wp2_wgs) 
+            bearing_deg = math.degrees(bearing)
+            if bearing_deg < 0: bearing_deg += 360
+            
+            # Output Litchi Waypoints (Start and End)
+            if sink_litchi:
+                for pt_wgs in [wp1_wgs, wp2_wgs]:
+                    f = QgsFeature()
+                    f.setGeometry(QgsGeometry.fromPointXY(pt_wgs))
+                    f.setAttributes([
+                        pt_wgs.y(), pt_wgs.x(), altitude,
+                        bearing_deg, # Heading (Coupled)
+                        0.0, 0, 0, -90, 1, speed, 0,0,0,0,0,
+                        dist_between_photos
+                    ])
+                    sink_litchi.addFeature(f, QgsFeatureSink.FastInsert)
+            
+            # Output Lines
+            if sink_lines:
+                lf = QgsFeature()
+                lf.setGeometry(QgsGeometry.fromPolylineXY([wp1_wgs, wp2_wgs]))
+                lf.setAttributes([strip_idx])
+                sink_lines.addFeature(lf, QgsFeatureSink.FastInsert)
+                
+            # Output Centroids
+            if sink_cent:
+                for i, pt_proj in enumerate(ordered_pts):
+                    cent_wgs = transform_back(pt_proj)
+                    cf = QgsFeature()
+                    cf.setGeometry(QgsGeometry.fromPointXY(cent_wgs))
+                    cf.setAttributes([strip_idx, i])
+                    sink_cent.addFeature(cf, QgsFeatureSink.FastInsert)
+            
+            reverse = not reverse
+
         return {
             self.OUTPUT_LITCHI: dest_id_litchi,
             self.OUTPUT_LINES: dest_id_lines,
