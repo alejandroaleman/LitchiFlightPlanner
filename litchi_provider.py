@@ -1,9 +1,11 @@
 from qgis.core import QgsProcessingProvider
 from .litchi_algorithm import LitchiFormatterAlgorithm
+from .litchi_generator import LitchiGeneratorAlgorithm
 
 class LitchiProvider(QgsProcessingProvider):
     def loadAlgorithms(self, *args, **kwargs):
         self.addAlgorithm(LitchiFormatterAlgorithm())
+        self.addAlgorithm(LitchiGeneratorAlgorithm())
 
     def id(self):
         return 'litchiconverter'

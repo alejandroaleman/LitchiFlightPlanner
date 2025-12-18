@@ -1,0 +1,20 @@
+{
+    "cameras": [
+        {
+            "name": "DJI Phantom 4 Standard",
+            "sensor_width_mm": 6.17,
+            "sensor_height_mm": 4.55,
+            "focal_length_mm": 3.61,
+            "image_width_px": 4000,
+            "image_height_px": 3000
+        },
+        {
+            "name": "DJI Mavic 2 Pro",
+            "sensor_width_mm": 13.2,
+            "sensor_height_mm": 8.8,
+            "focal_length_mm": 10.26,
+            "image_width_px": 5472,
+            "image_height_px": 3648
+        }
+    ]
+}

@@ -1,5 +1,5 @@
 [general]
-name=Litchi Mission Formatter
+name=Flight Planner for Litchi Missions
 qgisMinimumVersion=3.0
 description=Converts Flight Planner output to Litchi mission CSV.
 version=0.1
