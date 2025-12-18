@@ -4,9 +4,10 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingParameterFeatureSource,
                        QgsProcessingParameterEnum,
                        QgsProcessingParameterNumber,
-                       QgsProcessingOutputVectorLayer,
+                       QgsProcessingParameterFeatureSink,
                        QgsProcessingException,
                        QgsField,
+                       QgsFields,
                        QgsFeature,
                        QgsFeatureSink,
                        QgsGeometry,
@@ -29,7 +30,10 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
     OVERLAP_FWD = 'OVERLAP_FWD'
     OVERLAP_SIDE = 'OVERLAP_SIDE'
     BUFFER_PCT = 'BUFFER_PCT'
-    OUTPUT = 'OUTPUT'
+    
+    OUTPUT_LITCHI = 'OUTPUT_LITCHI'
+    OUTPUT_LINES = 'OUTPUT_LINES'
+    OUTPUT_CENTROIDS = 'OUTPUT_CENTROIDS'
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
@@ -50,7 +54,7 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         return 'customscripts'
 
     def shortHelpString(self):
-        return self.tr("Generates a photogrammetry flight plan for Litchi based on an area of interest.")
+        return self.tr("Generates a photogrammetry flight plan for Litchi. Outputs: Waypoints (CSV ready), Flight Lines, and Photo Centroids.")
 
     def initAlgorithm(self, config=None):
         self.addParameter(
@@ -87,7 +91,10 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterNumber(self.OVERLAP_SIDE, self.tr('Side Overlap (%)'), defaultValue=70.0))
         self.addParameter(QgsProcessingParameterNumber(self.BUFFER_PCT, self.tr('Buffer (%)'), defaultValue=0.0))
 
-        self.addOutput(QgsProcessingOutputVectorLayer(self.OUTPUT, self.tr('Litchi Mission')))
+        # Outputs
+        self.addParameter(QgsProcessingParameterFeatureSink(self.OUTPUT_LITCHI, self.tr('Litchi Mission (Waypoints)')))
+        self.addParameter(QgsProcessingParameterFeatureSink(self.OUTPUT_LINES, self.tr('Flight Lines'), optional=True))
+        self.addParameter(QgsProcessingParameterFeatureSink(self.OUTPUT_CENTROIDS, self.tr('Photo Centroids (QC)'), optional=True))
 
     def processAlgorithm(self, parameters, context, feedback):
         aoi_layer = self.parameterAsSource(parameters, self.AOI, context)
@@ -109,236 +116,204 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         sw, sh = cam['sensor_width_mm'], cam['sensor_height_mm']
         fl = cam['focal_length_mm']
         
-        # Calculations (Ground Footprint) in METERS
-        # Width (Cross Track) | Height (Along Track) -> Landscape orientation assumed
+        # Calculations (Ground Footprint)
         fp_width = (sw * altitude) / fl
         fp_height = (sh * altitude) / fl
         
         dist_between_lines = fp_width * (1 - overlap_side)
-        dist_between_photos = fp_height * (1 - overlap_fwd) # This is the interval
+        dist_between_photos = fp_height * (1 - overlap_fwd) 
         
         feedback.pushInfo(f"Camera: {cam['name']}")
-        feedback.pushInfo(f"Footprint: {fp_width:.2f}m x {fp_height:.2f}m")
         feedback.pushInfo(f"Line Spacing: {dist_between_lines:.2f}m")
         feedback.pushInfo(f"Photo Interval: {dist_between_photos:.2f}m")
 
-        # Prepare Output
-        fields = [
-            QgsField('latitude', QMetaType.Type.Double),
-            QgsField('longitude', QMetaType.Type.Double),
-            QgsField('altitude(m)', QMetaType.Type.Double),
-            QgsField('heading(deg)', QMetaType.Type.Double),
-            QgsField('curvesize(m)', QMetaType.Type.Double),
-            QgsField('rotationdir', QMetaType.Type.Int),
-            QgsField('gimbalmode', QMetaType.Type.Int),
-            QgsField('gimbalpitchangle', QMetaType.Type.Int),
-            QgsField('altitudemode', QMetaType.Type.Int),
-            QgsField('speed(m/s)', QMetaType.Type.Double),
-            QgsField('poi_latitude', QMetaType.Type.Double),
-            QgsField('poi_longitude', QMetaType.Type.Double),
-            QgsField('poi_altitude(m)', QMetaType.Type.Double),
-            QgsField('poi_altitudemode', QMetaType.Type.Int),
-            QgsField('photo_timeinterval', QMetaType.Type.Int),
-            QgsField('photo_distinterval', QMetaType.Type.Double)
-        ]
-        
-        # CRS Handling: Internal logic in WGS84 for lat/lon, but for Grid Generation it's better to use Projected.
-        # Ideally, we Project AOI to UTM auto-detected or use Source if Projected.
+        # CRS Setup
         source_crs = aoi_layer.sourceCrs()
         if source_crs.isGeographic():
-             # Crude fallback or warning? Best is to project to a local UTM.
-             # For simplicity in V1, we assume user projects or we use QgsDistanceArea for creating points? 
-             # Generating grid on LatLon is bad (degrees vs meters).
-             # Let's project to Pseudo-Mercator (3857) or finding UTM zone?
-             # 3857 is easy but distorts scale at high latitudes.
-             # Let's verify input.
-             feedback.pushInfo("Input CRS is Geographic. Reprojecting to Web Mercator for grid generation (scale distortion possible).")
+             feedback.pushInfo("Input CRS is Geographic. Reprojecting to Web Mercator for grid generation.")
              projected_crs = QgsCoordinateReferenceSystem("EPSG:3857")
         else:
-             projected_crs = source_crs # Assume input is projected meters
+             projected_crs = source_crs 
         
         wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
         
-        # Transformation Context
         tr_to_proj = QgsCoordinateTransform(source_crs, projected_crs, context.project())
         tr_to_wgs84 = QgsCoordinateTransform(projected_crs, wgs84, context.project())
         
-        # Combine all AOI geometries
-        combined_geom = QgsGeometry.fromWkt('POLYGON EMPTY')
+        # Combine Geometries
+        combined_geom = None
         for feat in aoi_layer.getFeatures():
             geom = feat.geometry()
-            if geom:
-                 combined_geom = combined_geom.combine(geom)
+            if geom and not geom.isEmpty():
+                if combined_geom is None:
+                    combined_geom = QgsGeometry(geom)
+                else:
+                    combined_geom = combined_geom.combine(geom)
         
-        # Transform combined geom to projected
+        if combined_geom is None or combined_geom.isEmpty():
+             raise QgsProcessingException("Input AOI layer contains no valid geometries.")
+        
         combined_geom.transform(tr_to_proj)
         
-        # Apply Buffer
         if buffer_pct > 0:
-            # Buffer by diagonal or bounding box size %? 
-            # Simple approach: Sqrt(Area) * pct
-            size_proxy = math.sqrt(combined_geom.area())
+            size_proxy = math.sqrt(abs(combined_geom.area()))
             buf_dist = size_proxy * buffer_pct
             combined_geom = combined_geom.buffer(buf_dist, 5)
         
         bbox = combined_geom.boundingBox()
-        
-        # Grid Generation Logic (Rotation)
-        # Center of bbox
         cx, cy = bbox.center().x(), bbox.center().y()
         
-        # We want lines at 'heading_angle'. QGIS rotation is usually CCW? standard math.
-        # Flight heading 0 (N) -> Lines Vertical.
-        # If we rotate the Geometry by -Angle, we can draw vertical lines, then rotate points back +Angle.
-        # Heading (Azimuth) 0 is Y axis. Math 0 is X axis.
-        # Azimuth 0 = Math 90. Azimuth 90 = Math 0.
-        # Rotation needed to satisfy: We want lines traveling along Azimuth.
-        # Actually standard "Lawnmower" generates lines perpendicular to flight path or along it?
-        # Usually "Flight Lines" are the path. So lines are ALONG the heading.
-        # If Heading is 0 (North), lines should be vertical (scan Y).
-        
-        # Rotate geom around center by -Heading
-        # QgsGeometry.rotate accepts degrees, standard CCW? Azimuth is CW from North.
-        # Let's handle math explicitly or use simple geometry rotation.
-        # If I rotate geometry so "Flight Line" becomes "X Axis" (Horizontal), I can scan Y.
-        # Heading 0 (Vertical). To make it Horizontal (90), I rotate by 90?
-        # Let's stick to standard practice: Rotate Points.
-        
-        # Algorithm:
-        # 1. Generate a large Enough Grid of points aligned with Heading.
-        # OR
-        # 2. Rotate Polygon to axis-aligned (0 deg). Generate Axis-aligned lines. Rotate lines back.
-        
-        # Heading 0 means travel North. Lines are Vertical.
-        # If we rotate Polygon by +Heading (CW) or -Heading?
-        # Let's assume Heading is Standard Azimuth (0=N, 90=E).
-        # We want lines running N-S.
-        # If we rotate Polygon by +90, N becomes E. Lines become Horizontal (E-W).
-        # We generate Horizontal lines.
-        # Then rotate back by -90.
-        
-        # Rotation for "Horizontal-izing" the flight path:
-        # We want the flight direction (Heading) to map to X-axis (0 deg math).
-        # Current Heading (Azimuth H). Math Angle M = 90 - H.
-        # We want M -> 0. So rotate by -M = H - 90.
-        
+        # Rotation logic
         rot_angle = heading_angle - 90
         
         geom_rotated = QgsGeometry(combined_geom)
         geom_rotated.rotate(rot_angle, QgsPointXY(cx, cy))
-        
         r_bbox = geom_rotated.boundingBox()
-        min_y = r_bbox.yMinimum()
-        max_y = r_bbox.yMaximum()
-        min_x = r_bbox.xMinimum()
-        max_x = r_bbox.xMaximum()
         
-        # Generate Lines (Horizontal now, since we aligned Heading to X)
-        lines = []
-        current_y = min_y + (dist_between_lines / 2) # Start half spacing inside? or edge.
-        # Usually centered or edge.
-        
-        # Direction flip for "Snake" pattern
+        # Outputs Setup
+        litchi_fields = QgsFields()
+        litchi_fields.append(QgsField('latitude', QMetaType.Type.Double))
+        litchi_fields.append(QgsField('longitude', QMetaType.Type.Double))
+        litchi_fields.append(QgsField('altitude(m)', QMetaType.Type.Double))
+        litchi_fields.append(QgsField('heading(deg)', QMetaType.Type.Double))
+        litchi_fields.append(QgsField('curvesize(m)', QMetaType.Type.Double))
+        litchi_fields.append(QgsField('rotationdir', QMetaType.Type.Int))
+        litchi_fields.append(QgsField('gimbalmode', QMetaType.Type.Int))
+        litchi_fields.append(QgsField('gimbalpitchangle', QMetaType.Type.Int))
+        litchi_fields.append(QgsField('altitudemode', QMetaType.Type.Int))
+        litchi_fields.append(QgsField('speed(m/s)', QMetaType.Type.Double))
+        litchi_fields.append(QgsField('poi_latitude', QMetaType.Type.Double))
+        litchi_fields.append(QgsField('poi_longitude', QMetaType.Type.Double))
+        litchi_fields.append(QgsField('poi_altitude(m)', QMetaType.Type.Double))
+        litchi_fields.append(QgsField('poi_altitudemode', QMetaType.Type.Int))
+        litchi_fields.append(QgsField('photo_timeinterval', QMetaType.Type.Int))
+        litchi_fields.append(QgsField('photo_distinterval', QMetaType.Type.Double))
+
+        line_fields = QgsFields()
+        line_fields.append(QgsField('id', QMetaType.Type.Int))
+
+        centroid_fields = QgsFields()
+        centroid_fields.append(QgsField('line_id', QMetaType.Type.Int))
+        centroid_fields.append(QgsField('photo_id', QMetaType.Type.Int))
+
+        (sink_litchi, dest_id_litchi) = self.parameterAsSink(parameters, self.OUTPUT_LITCHI, context, litchi_fields, QgsWkbTypes.Point, wgs84)
+        (sink_lines, dest_id_lines) = self.parameterAsSink(parameters, self.OUTPUT_LINES, context, line_fields, QgsWkbTypes.LineString, wgs84)
+        (sink_cent, dest_id_cent) = self.parameterAsSink(parameters, self.OUTPUT_CENTROIDS, context, centroid_fields, QgsWkbTypes.Point, wgs84)
+
+        current_y = r_bbox.yMinimum() + (dist_between_lines / 2)
         reverse = False
+        line_count = 0
         
-        waypoints_proj = []
-        
-        while current_y <= max_y:
-            # Create a line from min_x to max_x at current_y
-            # We clip this infinite-ish line with the rotated polygon
-            # Actually use bbox width to be safe
-            p_start = QgsPointXY(min_x - 1000, current_y) # extend a bit
-            p_end = QgsPointXY(max_x + 1000, current_y)
+        while current_y <= r_bbox.yMaximum():
+            p_start = QgsPointXY(r_bbox.xMinimum() - 1000, current_y)
+            p_end = QgsPointXY(r_bbox.xMaximum() + 1000, current_y)
             line_geom = QgsGeometry.fromPolylineXY([p_start, p_end])
             
-            # Intersect with rotated polygon
             intersection = line_geom.intersection(geom_rotated)
             
             if not intersection.isEmpty():
-                 # Intersection might be MultiLineString
                  parts = intersection.asGeometryCollection()
-                 for part in parts: # Usually one line if convex, but loop handles complex shapes
-                      # Extract segment points
-                      # part is a LineString geometry? or abstract.
-                      # intersection can be QgsGeometry.
-                      # Let's assume it converts to list of points approx.
-                      # robust way: interpolate points along the intersection line using dist_between_photos
-                      
-                      # length
+                 for part in parts:
                       length = part.length()
                       if length > 0:
-                          # Generate points
-                          # Start point? 
-                          # Snake logic: If reverse, start from end.
+                          line_count += 1
                           
-                          # Just uniform points:
-                          d = 0
-                          seg_points = []
-                          while d <= length:
-                              pt = part.interpolate(d).asPoint()
-                              seg_points.append(pt)
-                              d += dist_between_photos
+                          # 1. Generate Points for this Segment
+                          # Start/End
+                          pt_start_proj = part.startPoint()
+                          pt_end_proj = part.endPoint()
+                          
+                          # Litchi Waypoints Logic
+                          # We need 2 waypoints per line: Start and End.
+                          # Order depends on 'reverse' (Snake pattern).
                           
                           if reverse:
-                              seg_points.reverse()
+                              wp1_proj = pt_end_proj
+                              wp2_proj = pt_start_proj
+                          else:
+                              wp1_proj = pt_start_proj
+                              wp2_proj = pt_end_proj
                           
-                          waypoints_proj.extend(seg_points)
-            
-            current_y += dist_between_lines
-            reverse = not reverse # Toggle direction
-            
-        # Rotate/Transform back
-        final_features = []
-        
-        (sink, dest_id) = self.parameterAsSink(parameters, self.OUTPUT, context, fields, QgsWkbTypes.Point, wgs84)
-        if sink is None:
-             raise QgsProcessingException("Output sink failed")
+                          # Transform Logic (Helper)
+                          def transform_back(pt_proj):
+                                # Rotate back around Center
+                                px, py = pt_proj.x() - cx, pt_proj.y() - cy
+                                rad = math.radians(-rot_angle)
+                                nx = px * math.cos(rad) - py * math.sin(rad)
+                                ny = px * math.sin(rad) + py * math.cos(rad)
+                                fx, fy = nx + cx, ny + cy
+                                # To WGS84
+                                return tr_to_wgs84.transform(QgsPointXY(fx, fy))
+                          
+                          wp1_wgs84 = transform_back(wp1_proj)
+                          wp2_wgs84 = transform_back(wp2_proj)
+                          
+                          # Calculate Heading for this pair (WGS84 Azimuth)
+                          # We could use the input 'heading_angle' directly?
+                          # If snake pattern, even lines go Heading, odd lines go Heading + 180.
+                          # Litchi Heading: Direction drone faces. If mapping, usually aligned with flight.
+                          
+                          # Calculate true bearing between wp1 and wp2 in WGS84
+                          d = QgsDistanceArea()
+                          d.setSourceCrs(wgs84, context.project().transformContext())
+                          bearing = d.bearing(wp1_wgs84, wp2_wgs84) 
+                          bearing_deg = math.degrees(bearing)
+                          if bearing_deg < 0: bearing_deg += 360
+                          
+                          # Add Litchi Waypoints
+                          for pt_wgs in [wp1_wgs84, wp2_wgs84]:
+                              f = QgsFeature()
+                              f.setGeometry(QgsGeometry.fromPointXY(pt_wgs))
+                              f.setAttributes([
+                                  pt_wgs.y(), pt_wgs.x(), altitude,
+                                  bearing_deg, # Heading (Coupled)
+                                  0.0, 0, 0, -90, 1, speed, 0,0,0,0,0,
+                                  dist_between_photos
+                              ])
+                              if sink_litchi: sink_litchi.addFeature(f, QgsFeatureSink.FastInsert)
+                          
+                          # 2. Generate Visual Line
+                          if sink_lines:
+                              line_feat = QgsFeature()
+                              line_geom_wgs = QgsGeometry.fromPolylineXY([wp1_wgs84, wp2_wgs84])
+                              line_feat.setGeometry(line_geom_wgs)
+                              line_feat.setAttributes([line_count])
+                              sink_lines.addFeature(line_feat, QgsFeatureSink.FastInsert)
+                          
+                          # 3. Generate Centroids (QC)
+                          if sink_cent:
+                              current_dist = 0
+                              # Interpolate along the projected line part, then transform
+                              # Use correct direction
+                              # part is always min_x to max_x? QgsGeometry intersection result usually ordered.
+                              # If reverse, we need to handle interpolation distance carefully.
+                              
+                              # Easier: Construct a vector from wp1 to wp2
+                              while current_dist <= length:
+                                  # Interpolate on the projected segment?
+                                  # Actually, wp1_proj and wp2_proj are the ends.
+                                  # Vector maths on projected plane
+                                  ratio = current_dist / length
+                                  dx = wp2_proj.x() - wp1_proj.x()
+                                  dy = wp2_proj.y() - wp1_proj.y()
+                                  
+                                  interp_x = wp1_proj.x() + dx * ratio
+                                  interp_y = wp1_proj.y() + dy * ratio
+                                  
+                                  cent_wgs = transform_back(QgsPointXY(interp_x, interp_y))
+                                  
+                                  cf = QgsFeature()
+                                  cf.setGeometry(QgsGeometry.fromPointXY(cent_wgs))
+                                  cf.setAttributes([line_count, int(current_dist/dist_between_photos)])
+                                  sink_cent.addFeature(cf, QgsFeatureSink.FastInsert)
+                                  
+                                  current_dist += dist_between_photos
 
-        # Reuse Heading logic from existing algo? Or just constant heading?
-        # Litchi Heading: The direction the DRONE faces.
-        # Usually defined by "Heading Mode" (Auto vs Custom).
-        # We can set specific heading = heading_angle (Fixed).
-        
-        for idx, pt in enumerate(waypoints_proj):
-            # 1. Rotate back
-            # We rotated geometry by 'rot_angle' around (cx, cy).
-            # We need to rotate Point by -rot_angle around (cx, cy).
+            current_y += dist_between_lines
+            reverse = not reverse 
             
-            # QgsGeometry.fromPointXY(pt).rotate(-rot_angle... but that modifies geom.
-            # Math:
-            # translate to origin
-            px, py = pt.x() - cx, pt.y() - cy
-            # rotate
-            rad = math.radians(-rot_angle)
-            nx = px * math.cos(rad) - py * math.sin(rad)
-            ny = px * math.sin(rad) + py * math.cos(rad)
-            # translate back
-            fx, fy = nx + cx, ny + cy
-            
-            real_pt = QgsPointXY(fx, fy)
-            
-            # 2. Transform to WGS84
-            wgs_pt = tr_to_wgs84.transform(real_pt)
-            
-            feat = QgsFeature()
-            feat.setGeometry(QgsGeometry.fromPointXY(wgs_pt))
-            feat.setAttributes([
-                wgs_pt.y(),         # lat
-                wgs_pt.x(),         # lon
-                altitude,           # alt
-                heading_angle,      # Heading (Fixed to flight path? or 0?)
-                                    # Litchi: Heading is orientation of camera. 
-                                    # If mapping, usually aligned with path or North.
-                                    # Let's use Flight Direction.
-                0.0,                # curvesize (0 for straight lines)
-                0,                  # rot dir
-                0,                  # gimbal mode
-                -90,                # gimbal pitch (down)
-                1,                  # alt mode
-                speed,
-                0,0,0,0,0,
-                dist_between_photos # interval
-            ])
-            sink.addFeature(feat, QgsFeatureSink.FastInsert)
-            
-        return {self.OUTPUT: dest_id}
+        return {
+            self.OUTPUT_LITCHI: dest_id_litchi,
+            self.OUTPUT_LINES: dest_id_lines,
+            self.OUTPUT_CENTROIDS: dest_id_cent
+        }
