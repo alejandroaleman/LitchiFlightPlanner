@@ -1,4 +1,4 @@
-<img src="plugin.png" width="128" align="right" />
+<img src="plugin.png" width="80" align="right" />
 
 # Flight Planner for Litchi Missions (QGIS Plugin)
 
