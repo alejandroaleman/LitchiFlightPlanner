@@ -4,6 +4,10 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingParameterFeatureSource,
                        QgsProcessingParameterEnum,
                        QgsProcessingParameterNumber,
+                       QgsProcessingParameterNumber,
+                       QgsProcessingParameterBoolean,
+                       QgsProcessingParameterFileDestination,
+                       QgsProcessingParameterString,
                        QgsProcessingParameterFeatureSink,
                        QgsProcessingException,
                        QgsField,
@@ -20,6 +24,7 @@ from qgis.core import (QgsProcessing,
 import math
 import json
 import os
+import csv
 
 class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
     AOI = 'AOI'
@@ -32,10 +37,15 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
     EXTRA_LINES_START = 'EXTRA_LINES_START'
     EXTRA_LINES_END = 'EXTRA_LINES_END'
     EXTRA_PHOTOS_END = 'EXTRA_PHOTOS_END'
+    ADD_MID_POINT = 'ADD_MID_POINT'
+    SHUTTER_SPEED = 'SHUTTER_SPEED'
+    STOP_AND_SHOOT = 'STOP_AND_SHOOT'
+    AUTO_SPLIT = 'AUTO_SPLIT'
     
     OUTPUT_LITCHI = 'OUTPUT_LITCHI'
     OUTPUT_LINES = 'OUTPUT_LINES'
     OUTPUT_CENTROIDS = 'OUTPUT_CENTROIDS'
+    OUTPUT_FOLDER = 'OUTPUT_FOLDER'
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
@@ -96,11 +106,17 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterNumber(self.EXTRA_LINES_START, self.tr('Extra Lines at Start (N)'), defaultValue=2, type=QgsProcessingParameterNumber.Integer))
         self.addParameter(QgsProcessingParameterNumber(self.EXTRA_LINES_END, self.tr('Extra Lines at End (M)'), defaultValue=2, type=QgsProcessingParameterNumber.Integer))
         self.addParameter(QgsProcessingParameterNumber(self.EXTRA_PHOTOS_END, self.tr('Extra Photos at Ends (N)'), defaultValue=2, type=QgsProcessingParameterNumber.Integer))
+        self.addParameter(QgsProcessingParameterBoolean(self.ADD_MID_POINT, self.tr('Add Midpoint to Flight Lines'), defaultValue=False))
+        
+        self.addParameter(QgsProcessingParameterNumber(self.SHUTTER_SPEED, self.tr('Shutter Speed (1/X sec)'), defaultValue=1000, type=QgsProcessingParameterNumber.Integer))
+        self.addParameter(QgsProcessingParameterBoolean(self.STOP_AND_SHOOT, self.tr('Stop-and-Shoot Mode (Max Precision)'), defaultValue=False))
+        self.addParameter(QgsProcessingParameterBoolean(self.AUTO_SPLIT, self.tr('Auto-Split Missions (99 WP chunks)'), defaultValue=True))
 
         # Outputs
         self.addParameter(QgsProcessingParameterFeatureSink(self.OUTPUT_LITCHI, self.tr('Litchi Mission (Waypoints)')))
         self.addParameter(QgsProcessingParameterFeatureSink(self.OUTPUT_LINES, self.tr('Flight Lines'), optional=True))
         self.addParameter(QgsProcessingParameterFeatureSink(self.OUTPUT_CENTROIDS, self.tr('Photo Centroids (QC)'), optional=True))
+        self.addParameter(QgsProcessingParameterFileDestination(self.OUTPUT_FOLDER, self.tr('Folder for Split Missions'), optional=True, fileFilter='Folder'))
 
     def processAlgorithm(self, parameters, context, feedback):
         aoi_layer = self.parameterAsSource(parameters, self.AOI, context)
@@ -116,6 +132,11 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         extra_lines_start = self.parameterAsInt(parameters, self.EXTRA_LINES_START, context)
         extra_lines_end = self.parameterAsInt(parameters, self.EXTRA_LINES_END, context)
         extra_photos_end = self.parameterAsInt(parameters, self.EXTRA_PHOTOS_END, context)
+        add_mid_point = self.parameterAsBool(parameters, self.ADD_MID_POINT, context)
+        shutter_denom = self.parameterAsInt(parameters, self.SHUTTER_SPEED, context)
+        stop_and_shoot = self.parameterAsBool(parameters, self.STOP_AND_SHOOT, context)
+        auto_split = self.parameterAsBool(parameters, self.AUTO_SPLIT, context)
+        output_folder = self.parameterAsString(parameters, self.OUTPUT_FOLDER, context)
         
         # Get Camera Specs
         if not self.cameras:
@@ -144,17 +165,13 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(f"Photo Interval: {dist_between_photos:.2f}m")
 
         # CRS Setup
+        # CRS Setup
         source_crs = aoi_layer.sourceCrs()
-        if source_crs.isGeographic():
-             feedback.pushInfo("Input CRS is Geographic. Reprojecting to Web Mercator for grid generation.")
-             projected_crs = QgsCoordinateReferenceSystem("EPSG:3857")
-        else:
-             projected_crs = source_crs 
-        
         wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
         
-        tr_to_proj = QgsCoordinateTransform(source_crs, projected_crs, context.project())
-        tr_to_wgs84 = QgsCoordinateTransform(projected_crs, wgs84, context.project())
+        # Calculate Centroid for UTM Zone Selection to ensure Metric Accuracy
+        # We need the centroid in WGS84 to pick the zone
+        tr_source_to_wgs84 = QgsCoordinateTransform(source_crs, wgs84, context.project())
         
         # Combine Geometries (Original AOI)
         original_aoi_geom = None
@@ -168,7 +185,30 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         
         if original_aoi_geom is None or original_aoi_geom.isEmpty():
              raise QgsProcessingException("Input AOI layer contains no valid geometries.")
+
+        # Transform to WGS84 to find centroid
+        geom_wgs84 = QgsGeometry(original_aoi_geom)
+        geom_wgs84.transform(tr_source_to_wgs84)
+        centroid_wgs84 = geom_wgs84.boundingBox().center()
         
+        # UTM Zone Calculation
+        lon = centroid_wgs84.x()
+        lat = centroid_wgs84.y()
+        zone_number = math.floor((lon + 180) / 6) + 1
+        is_sourhern = lat < 0
+        
+        if is_sourhern:
+            epsg_code = 32700 + zone_number
+        else:
+            epsg_code = 32600 + zone_number
+            
+        projected_crs = QgsCoordinateReferenceSystem(f"EPSG:{epsg_code}")
+        feedback.pushInfo(f"Auto-detected UTM Zone {zone_number}{'S' if is_sourhern else 'N'} (EPSG:{epsg_code}) for metric calculation.")
+
+        tr_to_proj = QgsCoordinateTransform(source_crs, projected_crs, context.project())
+        tr_to_wgs84 = QgsCoordinateTransform(projected_crs, wgs84, context.project())
+        
+        # Transform Original AOI to Projected CRS
         original_aoi_geom.transform(tr_to_proj)
         
         # Rotation Center and Limits from Original AOI
@@ -292,6 +332,11 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         litchi_fields.append(QgsField('poi_altitudemode', QMetaType.Type.Int))
         litchi_fields.append(QgsField('photo_timeinterval', QMetaType.Type.Int))
         litchi_fields.append(QgsField('photo_distinterval', QMetaType.Type.Double))
+        
+        # Add 15 Action Pairs (Litchi Standard)
+        for i in range(1, 16):
+            litchi_fields.append(QgsField(f'actiontype{i}', QMetaType.Type.Int))
+            litchi_fields.append(QgsField(f'actionparam{i}', QMetaType.Type.Double))
 
         line_fields = QgsFields()
         line_fields.append(QgsField('strip_id', QMetaType.Type.Int))
@@ -334,8 +379,15 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         # Because `x_min_constraint` is from an Absolute coordinate system.
         
         strips = {}
-        total_valid = 0
         
+        strips = {}
+        total_valid = 0
+        total_distance_m = 0.0 # Accumulate total flight distance
+        total_waypoints_count = 0
+        total_photos_count = 0
+        
+        # NEW: Collect waypoints in a list for auto-splitting logic
+        all_waypoints_data = [] 
         
         # STRIP GENERATION - CLONE NEIGHBOR LOGIC
         # 1. Process Core Strips (Strictly Validated)
@@ -420,6 +472,7 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         sorted_indices = sorted(strips.keys())
         reverse = False
         previous_strip_end_wgs = None
+        previous_strip_end_proj = None
 
         for strip_idx in sorted_indices:
             pts_data = strips[strip_idx]
@@ -510,19 +563,67 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
             bearing_deg = math.degrees(bearing)
             if bearing_deg < 0: bearing_deg += 360
             
-            # OUTPUT LITCHI
-            if sink_litchi:
-                for pt in [final_start_wgs, final_end_wgs]:
-                    f = QgsFeature()
-                    f.setGeometry(QgsGeometry.fromPointXY(pt))
-                    f.setAttributes([
-                        pt.y(), pt.x(), altitude,
-                        bearing_deg, 
-                        0.0, 0, 0, -90, 1, speed, 0,0,0,0,0,
-                        dist_between_photos
-                    ])
-                    sink_litchi.addFeature(f, QgsFeatureSink.FastInsert)
+            total_photos_count += len(final_centroids_list)
             
+            # COLLECT WAYPOINTS DATA (For list-based processing)
+            # Each entry is a dict matching Litchi CSV columns
+            
+            def create_wp(pt, bearing):
+                # If Stop-and-Shoot, we add action "Take Photo" (1) at each waypoint
+                actions = {}
+                if stop_and_shoot:
+                    # Litchi CSV actions: actiontype1, actionparam1, ...
+                    actions['actiontype1'] = 1 # Take Photo
+                    actions['actionparam1'] = 0
+                
+                wp = {
+                    'latitude': pt.y(),
+                    'longitude': pt.x(),
+                    'altitude(m)': altitude,
+                    'heading(deg)': bearing,
+                    'curvesize(m)': dist_between_lines * 0.15 if not stop_and_shoot else 0.0,
+                    'rotationdir': 0,
+                    'gimbalmode': 0,
+                    'gimbalpitchangle': -90,
+                    'altitudemode': 1,
+                    'speed(m/s)': speed if not stop_and_shoot else 0.0,
+                    'poi_latitude': 0,
+                    'poi_longitude': 0,
+                    'poi_altitude(m)': 0,
+                    'poi_altitudemode': 0,
+                    'photo_timeinterval': 0,
+                    'photo_distinterval': dist_between_photos if not stop_and_shoot else 0.0
+                }
+                wp.update(actions)
+                return wp
+
+            # Add Start
+            all_waypoints_data.append(create_wp(final_start_wgs, bearing_deg))
+            
+            # Optional Midpoint
+            if add_mid_point and final_centroids_list:
+                n_pts = len(final_centroids_list)
+                mid_idx = (n_pts - 1) // 2
+                mid_pt_proj = final_centroids_list[mid_idx]
+                mid_pt_wgs = tr_to_wgs84.transform(mid_pt_proj)
+                all_waypoints_data.append(create_wp(mid_pt_wgs, bearing_deg))
+                
+            # Add End
+            all_waypoints_data.append(create_wp(final_end_wgs, bearing_deg))
+
+            # Legacy sink support (Full Mission)
+            # ... we will output later from the list for consistency
+            
+            # Calculate Distance for Report
+            # ... same as before
+            strip_len_proj = 0
+            for i in range(len(final_centroids_list) - 1):
+                p1 = final_centroids_list[i]
+                p2 = final_centroids_list[i+1]
+                strip_len_proj += math.sqrt((p1.x()-p2.x())**2 + (p1.y()-p2.y())**2)
+            
+            total_distance_m += strip_len_proj
+
             # OUTPUT FLIGHT LINE
             if sink_lines:
                 f = QgsFeature()
@@ -532,13 +633,170 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
                 
                 # OUTPUT CONNECTION LINE (Turn from previous end)
                 if previous_strip_end_wgs:
-                    f_turn = QgsFeature()
-                    f_turn.setGeometry(QgsGeometry.fromPolylineXY([previous_strip_end_wgs, final_start_wgs]))
-                    f_turn.setAttributes([strip_idx, 'Turn'])
-                    sink_lines.addFeature(f_turn, QgsFeatureSink.FastInsert)
+                    # Connection Distance
+                    # Turn is from previous_strip_end_wgs (WGS84) to final_start_wgs (WGS84)
+                    # We need the Projected Distance to add to our total
+                    # Let's keep track of previous end in Projected CRS as well
+                    pass
+
             
+            # Turn Distance Calculation
+            if previous_strip_end_proj:
+                # Distance from prev end to current start
+                curr_start_proj = final_centroids_list[0]
+                turn_dist = math.sqrt((curr_start_proj.x()-previous_strip_end_proj.x())**2 + (curr_start_proj.y()-previous_strip_end_proj.y())**2)
+                total_distance_m += turn_dist
+                
+                if sink_lines:
+                     f_turn = QgsFeature()
+                     f_turn.setGeometry(QgsGeometry.fromPolylineXY([previous_strip_end_wgs, final_start_wgs]))
+                     f_turn.setAttributes([strip_idx, 'Turn'])
+                     sink_lines.addFeature(f_turn, QgsFeatureSink.FastInsert)
+
             previous_strip_end_wgs = final_end_wgs
+            previous_strip_end_proj = final_centroids_list[-1]
             reverse = not reverse
+
+        # POST-PROCESSING: OUTPUT LITCHI FROM COLLECTED LIST
+        # Column names for Litchi CSV (including actions if needed)
+        litchi_cols = [
+            'latitude', 'longitude', 'altitude(m)', 'heading(deg)', 'curvesize(m)',
+            'rotationdir', 'gimbalmode', 'gimbalpitchangle', 'altitudemode', 'speed(m/s)',
+            'poi_latitude', 'poi_longitude', 'poi_altitude(m)', 'poi_altitudemode',
+            'photo_timeinterval', 'photo_distinterval'
+        ]
+        if stop_and_shoot:
+            litchi_cols += ['actiontype1', 'actionparam1']
+        
+        # Populate Sink (Full Mission)
+        if sink_litchi:
+            for wp_dict in all_waypoints_data:
+                f = QgsFeature()
+                f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(wp_dict['longitude'], wp_dict['latitude'])))
+                # Attributes must match litchi_fields defined earlier
+                # latitude, longitude, altitude, heading, curvesize, rot, gimb, pitch, altmode, speed, ...
+                attrs = [
+                    wp_dict['latitude'], wp_dict['longitude'], wp_dict['altitude(m)'],
+                    wp_dict['heading(deg)'], wp_dict['curvesize(m)'], wp_dict['rotationdir'],
+                    wp_dict['gimbalmode'], wp_dict['gimbalpitchangle'], wp_dict['altitudemode'],
+                    wp_dict['speed(m/s)'], wp_dict['poi_latitude'], wp_dict['poi_longitude'],
+                    wp_dict['poi_altitude(m)'], wp_dict['poi_altitudemode'],
+                    wp_dict['photo_timeinterval'], wp_dict['photo_distinterval']
+                ]
+                # Always add 15 Action Pairs to match fields definition
+                if stop_and_shoot:
+                    attrs += [wp_dict.get('actiontype1', 1), wp_dict.get('actionparam1', 0)]
+                else:
+                    attrs += [-1, 0]
+                
+                # Remaining 14 actions
+                for _ in range(14):
+                    attrs += [-1, 0]
+                
+                f.setAttributes(attrs)
+                sink_litchi.addFeature(f, QgsFeatureSink.FastInsert)
+        
+        total_waypoints_count = len(all_waypoints_data)
+
+        # AUTO-SPLIT LOGIC (File based)
+        if auto_split and total_waypoints_count > 99:
+             # We try to determine a base name from the output sink if possible, or use a default
+             # In processing, we don't always have a real file path for the sink unless it was specified.
+             # Let's check feedback or use a temp path? 
+             # Better: Use the same directory where the report would have gone, or provide a log info.
+             feedback.pushInfo(f"Auto-split enabled. Mission has {total_waypoints_count} waypoints. Splitting into {math.ceil(total_waypoints_count/99)} parts.")
+             
+             # Chunking
+             for i in range(0, total_waypoints_count, 99):
+                 chunk = all_waypoints_data[i : i + 99]
+                 part_num = (i // 99) + 1
+                 
+                 if output_folder:
+                     # ensure directory exists (user might provide a placeholder file path)
+                     folder = os.path.dirname(output_folder) if not os.path.isdir(output_folder) else output_folder
+                     if not os.path.exists(folder):
+                         os.makedirs(folder, exist_ok=True)
+                     
+                     file_path = os.path.join(folder, f"mission_part{part_num}.csv")
+                     with open(file_path, 'w', newline='') as csvfile:
+                         # Use all columns present in the first wp
+                         fieldnames = [
+                            'latitude', 'longitude', 'altitude(m)', 'heading(deg)', 'curvesize(m)',
+                            'rotationdir', 'gimbalmode', 'gimbalpitchangle', 'altitudemode', 'speed(m/s)',
+                            'poi_latitude', 'poi_longitude', 'poi_altitude(m)', 'poi_altitudemode',
+                            'photo_timeinterval', 'photo_distinterval'
+                         ]
+                         # Add all 15 action cols
+                         for j in range(1, 16):
+                             fieldnames += [f'actiontype{j}', f'actionparam{j}']
+                             
+                         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                         writer.writeheader()
+                         for wp in chunk:
+                             # Fill missing action cols for the CSV
+                             full_wp = wp.copy()
+                             for j in range(1, 16):
+                                 full_wp.setdefault(f'actiontype{j}', -1)
+                                 full_wp.setdefault(f'actionparam{j}', 0)
+                             writer.writerow({k: full_wp[k] for k in fieldnames})
+                     
+                     feedback.pushInfo(f"Saved part {part_num} to: {file_path}")
+
+        # Full Report Generation (Log)
+        total_time_seconds = total_distance_m / speed
+        total_time_min = total_time_seconds / 60.0
+        
+        # Motion Blur Check
+        shutter_sec = 1.0 / shutter_denom
+        motion_blur = speed * shutter_sec # Meters per exposure
+        blur_status = "OK"
+        gsd_m = gsd_cm / 100.0
+        if motion_blur > gsd_m:
+            blur_status = "CRITICAL (Blur > GSD)"
+        elif motion_blur > gsd_m / 2.0:
+            blur_status = "WARNING (Blur > GSD/2)"
+        
+        cam_battery_max = cam.get('max_flight_time_minutes', 0)
+        if cam_battery_max > 0:
+            safe_flight_time = cam_battery_max * 0.8 # 20% safety margin
+            batteries_needed = total_time_min / safe_flight_time
+            battery_str = f"{batteries_needed:.2f} (approx {math.ceil(batteries_needed)})"
+            safe_margin_str = f"(assuming {safe_flight_time:.1f} min safe flight time per battery)"
+        else:
+            battery_str = "N/A (Update cameras.json)"
+            safe_margin_str = ""
+
+        feedback.pushInfo("")
+        feedback.pushInfo("=== Litchi Mission Report ===")
+        feedback.pushInfo(f"Camera: {cam['name']}")
+        feedback.pushInfo(f"Area: {original_aoi_geom.area():.2f} sq m (approx)")
+        feedback.pushInfo("Mission Statistics:")
+        feedback.pushInfo(f"- Total Distance: {total_distance_m:.2f} m")
+        feedback.pushInfo(f"- Speed: {speed} m/s")
+        feedback.pushInfo(f"- Estimated Flight Time: {total_time_min:.2f} minutes")
+        feedback.pushInfo(f"- Batteries Required: {battery_str} {safe_margin_str}")
+        feedback.pushInfo(f"- Waypoints: {total_waypoints_count}")
+        if total_waypoints_count > 99:
+            feedback.reportError(f"WARNING: Waypoint count ({total_waypoints_count}) exceeds Litchi limit of 99!")
+            if not auto_split:
+                 feedback.reportError("Tip: Enable 'Auto-Split Missions' for easier management.")
+        
+        feedback.pushInfo(f"- Photos: {total_photos_count}")
+        if total_photos_count > 999:
+            feedback.reportError(f"WARNING: Photo count ({total_photos_count}) exceeds WebODM free tier limit of 999!")
+
+        feedback.pushInfo(f"- Motion Blur: {motion_blur*1000:.2f} mm ({blur_status})")
+        if blur_status != "OK":
+             feedback.reportError(f"Motion Blur {blur_status}. Increase shutter speed or decrease flight speed.")
+
+        feedback.pushInfo("")
+        feedback.pushInfo("Detailed Settings:")
+        feedback.pushInfo(f"- GSD: {gsd_cm} cm/px")
+        feedback.pushInfo(f"- Altitude: {altitude:.2f} m")
+        feedback.pushInfo(f"- Heading: {heading_angle} deg")
+        feedback.pushInfo(f"- Overlap: {overlap_fwd*100:.0f}% Fwd, {overlap_side*100:.0f}% Side")
+        feedback.pushInfo(f"- Projection Used: EPSG:{epsg_code}")
+        feedback.pushInfo("")
 
         return {
             self.OUTPUT_LITCHI: dest_id_litchi,

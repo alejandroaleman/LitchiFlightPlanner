@@ -1,5 +1,31 @@
 # Flight Planner for Litchi Missions - Changelog
 
+## Version 0.1.1 (Professional Optimization) - 2025-12-20
+
+Significant upgrade focusing on precision, safety, and workflow automation.
+
+### New Features
+*   **Precision Projection System**: Automatic detection of the correct UTM zone based on the AOI centroid. Metric calculations (GSD, distances) are now performed in a local CRS for absolute accuracy.
+*   **Professional Reporting**: The log tab now shows a complete flight report including:
+    - Total flight distance.
+    - Estimated mission time.
+    - Necessary battery cycles (based on camera-specific max flight time).
+*   **Safety & Compliance Checks**:
+    - **Waypoint Limit**: Warnings if waypoints exceed 99 (Litchi hardware limit).
+    - **Photo Limit**: Warnings if photos exceed 999 (standard free-tier processing limit).
+    - **Motion Blur Safety**: Integrated calculator that warns if Flight Speed vs Shutter Speed will result in blurry images.
+*   **Advanced Flight Modes**:
+    - **Auto-Split Engine**: Automatically generates multiple `.csv` files for large missions.
+    - **Stop-and-Shoot Mode**: High-precision mode with triggers at every waypoint and 0% motion blur.
+    - **Aligned Midpoints**: Centroid-aligned waypoints for enhanced terrain following in Litchi's ground follow mode.
+
+### Improvements
+*   **User Interface**: New parameters for Shutter Speed, Auto-split destinations, and Stop-and-Shoot mode.
+*   **Camera Database**: Added `max_flight_time` field for battery estimation.
+*   **Documentation**: Resized README icon and added a "Pro Tips: Mapping Checklist" section.
+
+---
+
 ## Version 0.1.0 (Development Release) - 2025-12-18
 
 First functional release of the integrated suite.

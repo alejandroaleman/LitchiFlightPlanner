@@ -13,6 +13,7 @@ class LitchiAddCameraAlgorithm(QgsProcessingAlgorithm):
     FOCAL_LENGTH = 'FOCAL_LENGTH'
     IMAGE_WIDTH = 'IMAGE_WIDTH'
     IMAGE_HEIGHT = 'IMAGE_HEIGHT'
+    MAX_FLIGHT_TIME = 'MAX_FLIGHT_TIME'
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
@@ -42,6 +43,7 @@ class LitchiAddCameraAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterNumber(self.FOCAL_LENGTH, self.tr('Focal Length (mm)'), type=QgsProcessingParameterNumber.Double, defaultValue=8.8))
         self.addParameter(QgsProcessingParameterNumber(self.IMAGE_WIDTH, self.tr('Image Width (px)'), type=QgsProcessingParameterNumber.Integer, defaultValue=5472))
         self.addParameter(QgsProcessingParameterNumber(self.IMAGE_HEIGHT, self.tr('Image Height (px)'), type=QgsProcessingParameterNumber.Integer, defaultValue=3648))
+        self.addParameter(QgsProcessingParameterNumber(self.MAX_FLIGHT_TIME, self.tr('Max Flight Time (min)'), type=QgsProcessingParameterNumber.Integer, defaultValue=30))
 
     def processAlgorithm(self, parameters, context, feedback):
         name = self.parameterAsString(parameters, self.CAMERA_NAME, context)
@@ -50,6 +52,7 @@ class LitchiAddCameraAlgorithm(QgsProcessingAlgorithm):
         fl = self.parameterAsDouble(parameters, self.FOCAL_LENGTH, context)
         iw = self.parameterAsInt(parameters, self.IMAGE_WIDTH, context)
         ih = self.parameterAsInt(parameters, self.IMAGE_HEIGHT, context)
+        mft = self.parameterAsInt(parameters, self.MAX_FLIGHT_TIME, context)
 
         if not name:
              feedback.reportError("Camera name cannot be empty.")
@@ -61,7 +64,8 @@ class LitchiAddCameraAlgorithm(QgsProcessingAlgorithm):
             "sensor_height_mm": sh,
             "focal_length_mm": fl,
             "image_width_px": iw,
-            "image_height_px": ih
+            "image_height_px": ih,
+            "max_flight_time_minutes": mft
         }
 
         # Path to cameras.json (same dir as this script)

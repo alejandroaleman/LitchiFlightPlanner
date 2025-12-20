@@ -2,10 +2,10 @@
 name=Flight Planner for Litchi Missions
 qgisMinimumVersion=3.0
 description=Professional Photogrammetry Flight Planner for Litchi (GSD-based).
-version=0.1.0
+version=0.1.1
 author=Alejandro Aleman
 email=janoaleman@gmail.com
-about=Generates grid-based flight missions for Litchi based on AOI, Camera specs, and GSD. Includes advanced geometric filtering and preview layer generation.
+about=Advanced photogrammetry planner for Litchi. Now featuring: 1. Auto-Split (automatically generates multiple CSV files for missions >99 waypoints). 2. Motion Blur Safety (input Shutter Speed denominator [e.g. 1000] to verify image sharpness vs GSD). 3. Stop-and-Shoot mode for maximum 3D precision. 4. Battery Estimation and UTM auto-projection for metric accuracy.
 tracker=https://github.com/alejandroaleman/LitchiFlightPlanner/issues
 repository=https://github.com/alejandroaleman/LitchiFlightPlanner
 tags=processing, litchi, drone, photogrammetry, flight-plan
