@@ -36,8 +36,8 @@ The core tool of the suite. Inputs a Polygon AOI and generates a ready-to-fly Li
 
 1.  **Download/Clone**:
     Clone this repository into your QGIS plugins directory.
-    *   **Linux**: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/LitchiFlightPlanner`
-    *   **Windows**: `C:\Users\{User}\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\LitchiFlightPlanner`
+    *   **Linux**: `~/.local/share/QGIS/QGIS4/profiles/default/python/plugins/LitchiFlightPlanner` (or `QGIS3` for older versions)
+    *   **Windows**: `C:\Users\{User}\AppData\Roaming\QGIS\QGIS4\profiles\default\python\plugins\LitchiFlightPlanner`
 
 2.  **Activate**:
     Restart QGIS and enable **Flight Planner for Litchi Missions** in `Plugins > Manage and Install Plugins`.
@@ -50,6 +50,7 @@ The core tool of the suite. Inputs a Polygon AOI and generates a ready-to-fly Li
     *   Choose your **Camera** and target **GSD**.
     *   Adjust **Heading** and **Overlaps**.
     *   (Optional) Add **Extra Lines** at Start/End for better approach.
+    *   (Optional) Use **Extra Photos First/Last Strip** to extend boundaries (use negative values to extend the beginning, positive for the end).
     *   Run!
 
 2.  **Export to Litchi**:

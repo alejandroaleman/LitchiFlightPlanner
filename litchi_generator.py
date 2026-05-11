@@ -1,9 +1,8 @@
-from qgis.PyQt.QtCore import QCoreApplication, QMetaType, QVariant
+from qgis.PyQt.QtCore import QCoreApplication, QVariant
 from qgis.core import (QgsProcessing,
                        QgsProcessingAlgorithm,
                        QgsProcessingParameterFeatureSource,
                        QgsProcessingParameterEnum,
-                       QgsProcessingParameterNumber,
                        QgsProcessingParameterNumber,
                        QgsProcessingParameterBoolean,
                        QgsProcessingParameterFileDestination,
@@ -37,6 +36,8 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
     EXTRA_LINES_START = 'EXTRA_LINES_START'
     EXTRA_LINES_END = 'EXTRA_LINES_END'
     EXTRA_PHOTOS_END = 'EXTRA_PHOTOS_END'
+    EXTRA_PHOTOS_FIRST_STRIP = 'EXTRA_PHOTOS_FIRST_STRIP'
+    EXTRA_PHOTOS_LAST_STRIP = 'EXTRA_PHOTOS_LAST_STRIP'
     ADD_MID_POINT = 'ADD_MID_POINT'
     SHUTTER_SPEED = 'SHUTTER_SPEED'
     STOP_AND_SHOOT = 'STOP_AND_SHOOT'
@@ -96,16 +97,18 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
-        self.addParameter(QgsProcessingParameterNumber(self.GSD, self.tr('Target GSD (cm/px)'), defaultValue=2.5))
-        self.addParameter(QgsProcessingParameterNumber(self.SPEED, self.tr('Speed (m/s)'), defaultValue=8.0))
-        self.addParameter(QgsProcessingParameterNumber(self.HEADING, self.tr('Flight Direction (Degrees)'), defaultValue=-13.0))
-        self.addParameter(QgsProcessingParameterNumber(self.OVERLAP_FWD, self.tr('Forward Overlap (%)'), defaultValue=70.0))
-        self.addParameter(QgsProcessingParameterNumber(self.OVERLAP_SIDE, self.tr('Side Overlap (%)'), defaultValue=65.0))
+        self.addParameter(QgsProcessingParameterNumber(self.GSD, self.tr('Target GSD (cm/px)'), type=QgsProcessingParameterNumber.Double, defaultValue=2.5))
+        self.addParameter(QgsProcessingParameterNumber(self.SPEED, self.tr('Speed (m/s)'), type=QgsProcessingParameterNumber.Double, defaultValue=8.0))
+        self.addParameter(QgsProcessingParameterNumber(self.HEADING, self.tr('Flight Direction (Degrees)'), type=QgsProcessingParameterNumber.Double, defaultValue=0.0))
+        self.addParameter(QgsProcessingParameterNumber(self.OVERLAP_FWD, self.tr('Forward Overlap (%)'), type=QgsProcessingParameterNumber.Double, defaultValue=70.0))
+        self.addParameter(QgsProcessingParameterNumber(self.OVERLAP_SIDE, self.tr('Side Overlap (%)'), type=QgsProcessingParameterNumber.Double, defaultValue=65.0))
         
         # Advanced Buffers (Explicit Lines)
         self.addParameter(QgsProcessingParameterNumber(self.EXTRA_LINES_START, self.tr('Extra Lines at Start (N)'), defaultValue=2, type=QgsProcessingParameterNumber.Integer))
         self.addParameter(QgsProcessingParameterNumber(self.EXTRA_LINES_END, self.tr('Extra Lines at End (M)'), defaultValue=2, type=QgsProcessingParameterNumber.Integer))
         self.addParameter(QgsProcessingParameterNumber(self.EXTRA_PHOTOS_END, self.tr('Extra Photos at Ends (N)'), defaultValue=2, type=QgsProcessingParameterNumber.Integer))
+        self.addParameter(QgsProcessingParameterNumber(self.EXTRA_PHOTOS_FIRST_STRIP, self.tr('Extra Photos First Strip (N)'), defaultValue=0, type=QgsProcessingParameterNumber.Integer))
+        self.addParameter(QgsProcessingParameterNumber(self.EXTRA_PHOTOS_LAST_STRIP, self.tr('Extra Photos Last Strip (N)'), defaultValue=0, type=QgsProcessingParameterNumber.Integer))
         self.addParameter(QgsProcessingParameterBoolean(self.ADD_MID_POINT, self.tr('Add Midpoint to Flight Lines'), defaultValue=False))
         
         self.addParameter(QgsProcessingParameterNumber(self.SHUTTER_SPEED, self.tr('Shutter Speed (1/X sec)'), defaultValue=1000, type=QgsProcessingParameterNumber.Integer))
@@ -132,6 +135,8 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         extra_lines_start = self.parameterAsInt(parameters, self.EXTRA_LINES_START, context)
         extra_lines_end = self.parameterAsInt(parameters, self.EXTRA_LINES_END, context)
         extra_photos_end = self.parameterAsInt(parameters, self.EXTRA_PHOTOS_END, context)
+        extra_photos_first_strip = self.parameterAsInt(parameters, self.EXTRA_PHOTOS_FIRST_STRIP, context)
+        extra_photos_last_strip = self.parameterAsInt(parameters, self.EXTRA_PHOTOS_LAST_STRIP, context)
         add_mid_point = self.parameterAsBool(parameters, self.ADD_MID_POINT, context)
         shutter_denom = self.parameterAsInt(parameters, self.SHUTTER_SPEED, context)
         stop_and_shoot = self.parameterAsBool(parameters, self.STOP_AND_SHOOT, context)
@@ -146,25 +151,24 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         fl = cam['focal_length_mm']
         im_w, im_h = cam['image_width_px'], cam['image_height_px']
         
-        # GSD to Altitude Calculation
+        # 1. Base Parameters
         gsd_m = gsd_cm / 100.0
         altitude = (gsd_m * fl * im_w) / sw
         
         feedback.pushInfo(f"Camera: {cam['name']}")
         feedback.pushInfo(f"GSD: {gsd_cm} cm/px -> Calculated Altitude: {altitude:.2f} m")
         
-        # Calculations (Ground Footprint)
+        # 2. Footprint & Grid Spacing
         fp_width = (sw * altitude) / fl
         fp_height = (sh * altitude) / fl
         
         dist_between_lines = fp_width * (1 - overlap_side)
         dist_between_photos = fp_height * (1 - overlap_fwd) 
         
-        feedback.pushInfo(f"Footprint: {fp_width:.2f}m x {fp_height:.2f}m")
-        feedback.pushInfo(f"Line Spacing: {dist_between_lines:.2f}m")
-        feedback.pushInfo(f"Photo Interval: {dist_between_photos:.2f}m")
+        feedback.pushInfo(f"Footprint: {fp_width:.2f} m x {fp_height:.2f} m")
+        feedback.pushInfo(f"Line Spacing: {dist_between_lines:.2f} m")
+        feedback.pushInfo(f"Photo Interval: {dist_between_photos:.2f} m")
 
-        # CRS Setup
         # CRS Setup
         source_crs = aoi_layer.sourceCrs()
         wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
@@ -195,15 +199,15 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         lon = centroid_wgs84.x()
         lat = centroid_wgs84.y()
         zone_number = math.floor((lon + 180) / 6) + 1
-        is_sourhern = lat < 0
+        is_southern = lat < 0
         
-        if is_sourhern:
+        if is_southern:
             epsg_code = 32700 + zone_number
         else:
             epsg_code = 32600 + zone_number
             
         projected_crs = QgsCoordinateReferenceSystem(f"EPSG:{epsg_code}")
-        feedback.pushInfo(f"Auto-detected UTM Zone {zone_number}{'S' if is_sourhern else 'N'} (EPSG:{epsg_code}) for metric calculation.")
+        feedback.pushInfo(f"Auto-detected UTM Zone {zone_number}{'S' if is_southern else 'N'} (EPSG:{epsg_code}) for metric calculation.")
 
         tr_to_proj = QgsCoordinateTransform(source_crs, projected_crs, context.project())
         tr_to_wgs84 = QgsCoordinateTransform(projected_crs, wgs84, context.project())
@@ -211,22 +215,25 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         # Transform Original AOI to Projected CRS
         original_aoi_geom.transform(tr_to_proj)
         
+        # Rotation Angle: To align the desired bearing with the horizontal X-axis (0 deg),
+        # we need to rotate the world by (heading - 90).
+        rotation_to_horizontal = heading_angle - 90
+        
+        # Pre-calculate Rotation Constants for Performance
+        # To go from relative (rx, ry) back to world, we rotate by (90 - heading)
+        rad_rot = math.radians(90 - heading_angle)
+        cos_rot = math.cos(rad_rot)
+        sin_rot = math.sin(rad_rot)
+        
         # Rotation Center and Limits from Original AOI
         bbox_world = original_aoi_geom.boundingBox()
         cx, cy = bbox_world.center().x(), bbox_world.center().y()
-        rotation_center = QgsPointXY(cx, cy)
         
-        # Rotation Angle
-        rotation_to_horizontal = 90 - heading_angle
-        
-        # Transformation Helper (Moved up for scope access)
+        # Transformation Helper
         def rotated_rel_to_world(rx, ry):
-            rad = math.radians(-rotation_to_horizontal)
-            wx = rx * math.cos(rad) - ry * math.sin(rad)
-            wy = rx * math.sin(rad) + ry * math.cos(rad)
-            final_x = wx + cx
-            final_y = wy + cy
-            return QgsPointXY(final_x, final_y)
+            wx = rx * cos_rot - ry * sin_rot
+            wy = rx * sin_rot + ry * cos_rot
+            return QgsPointXY(wx + cx, wy + cy)
         
         # 1. Rotated Buffered AOI (for Y limits reference, though we use diagonal for grid loop)
         # geom_buffered_rotated = QgsGeometry(buffered_aoi_geom)
@@ -234,7 +241,7 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         
         # 2. Rotated ORIGINAL AOI (For Longitudinal X Limits constraint)
         geom_original_rotated = QgsGeometry(original_aoi_geom)
-        geom_original_rotated.rotate(rotation_to_horizontal, rotation_center)
+        geom_original_rotated.rotate(rotation_to_horizontal, QgsPointXY(cx, cy))
         r_orig_bbox = geom_original_rotated.boundingBox()
         x_min_constraint = r_orig_bbox.xMinimum()
         x_max_constraint = r_orig_bbox.xMaximum()
@@ -259,31 +266,21 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         rel_y_min_core = y_min_core - cy
         rel_y_max_core = y_max_core - cy
         
-        # Construct Core Ys (from center outwards to ensure symmetry? Or just bottom-up covering?)
-        # Let's use Bottom-Up for simpler index logic.
-        # Start Y: Smallest Y such that Y >= rel_y_min_core? 
-        # Actually, let's just generate a minimal set of lines covering the range.
-        # Start at rel_y_min_core + offset?
-        # Let's stick to the "Centered Grid" approach: 0 is a line.
-        # Generate lines outwards from 0 until they exceed rel_y_max_core / rel_y_min_core.
-        
-        core_ys = []
-        # Positive (and 0)
-        curr = 0
-        # Relaxed bounds just to gather candidates, but we will filter them strictly next.
-        while curr <= rel_y_max_core + dist_between_lines: 
-            if curr >= rel_y_min_core - dist_between_lines: 
-               core_ys.append(curr)
+        # Generate Y coordinates covering the core AOI range
+        # Start at 0 and go up/down to ensure symmetric grid alignment relative to center
+        core_ys = [0]
+        # Up
+        curr = dist_between_lines
+        while curr <= rel_y_max_core + dist_between_lines:
+            core_ys.append(curr)
             curr += dist_between_lines
-            
-        # Negative
+        # Down
         curr = -dist_between_lines
         while curr >= rel_y_min_core - dist_between_lines:
-            if curr <= rel_y_max_core + dist_between_lines:
-                core_ys.append(curr)
+            core_ys.append(curr)
             curr -= dist_between_lines
             
-        core_ys = sorted(list(set(core_ys)))
+        core_ys = sorted(core_ys)
         
         # VALIDATE CORE Ys: Filter to those that ACTUALLY intersect the Original AOI.
         # This prevents "floating" core lines that don't touch the polygon (which would be treated as auto-side-strips).
@@ -316,70 +313,43 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         
         # Prepare Sinks
         litchi_fields = QgsFields()
-        litchi_fields.append(QgsField('latitude', QMetaType.Type.Double))
-        litchi_fields.append(QgsField('longitude', QMetaType.Type.Double))
-        litchi_fields.append(QgsField('altitude(m)', QMetaType.Type.Double))
-        litchi_fields.append(QgsField('heading(deg)', QMetaType.Type.Double))
-        litchi_fields.append(QgsField('curvesize(m)', QMetaType.Type.Double))
-        litchi_fields.append(QgsField('rotationdir', QMetaType.Type.Int))
-        litchi_fields.append(QgsField('gimbalmode', QMetaType.Type.Int))
-        litchi_fields.append(QgsField('gimbalpitchangle', QMetaType.Type.Int))
-        litchi_fields.append(QgsField('altitudemode', QMetaType.Type.Int))
-        litchi_fields.append(QgsField('speed(m/s)', QMetaType.Type.Double))
-        litchi_fields.append(QgsField('poi_latitude', QMetaType.Type.Double))
-        litchi_fields.append(QgsField('poi_longitude', QMetaType.Type.Double))
-        litchi_fields.append(QgsField('poi_altitude(m)', QMetaType.Type.Double))
-        litchi_fields.append(QgsField('poi_altitudemode', QMetaType.Type.Int))
-        litchi_fields.append(QgsField('photo_timeinterval', QMetaType.Type.Int))
-        litchi_fields.append(QgsField('photo_distinterval', QMetaType.Type.Double))
+        litchi_fields.append(QgsField('latitude', QVariant.Double))
+        litchi_fields.append(QgsField('longitude', QVariant.Double))
+        litchi_fields.append(QgsField('altitude(m)', QVariant.Double))
+        litchi_fields.append(QgsField('heading(deg)', QVariant.Double))
+        litchi_fields.append(QgsField('curvesize(m)', QVariant.Double))
+        litchi_fields.append(QgsField('rotationdir', QVariant.Int))
+        litchi_fields.append(QgsField('gimbalmode', QVariant.Int))
+        litchi_fields.append(QgsField('gimbalpitchangle', QVariant.Int))
+        litchi_fields.append(QgsField('altitudemode', QVariant.Int))
+        litchi_fields.append(QgsField('speed(m/s)', QVariant.Double))
+        litchi_fields.append(QgsField('poi_latitude', QVariant.Double))
+        litchi_fields.append(QgsField('poi_longitude', QVariant.Double))
+        litchi_fields.append(QgsField('poi_altitude(m)', QVariant.Double))
+        litchi_fields.append(QgsField('poi_altitudemode', QVariant.Int))
+        litchi_fields.append(QgsField('photo_timeinterval', QVariant.Int))
+        litchi_fields.append(QgsField('photo_distinterval', QVariant.Double))
         
         # Add 15 Action Pairs (Litchi Standard)
         for i in range(1, 16):
-            litchi_fields.append(QgsField(f'actiontype{i}', QMetaType.Type.Int))
-            litchi_fields.append(QgsField(f'actionparam{i}', QMetaType.Type.Double))
+            litchi_fields.append(QgsField(f'actiontype{i}', QVariant.Int))
+            litchi_fields.append(QgsField(f'actionparam{i}', QVariant.Double))
 
         line_fields = QgsFields()
-        line_fields.append(QgsField('strip_id', QMetaType.Type.Int))
+        line_fields.append(QgsField('strip_id', QVariant.Int))
         line_fields.append(QgsField('type', QVariant.String))
 
         centroid_fields = QgsFields()
-        centroid_fields.append(QgsField('strip_id', QMetaType.Type.Int))
-        centroid_fields.append(QgsField('photo_id', QMetaType.Type.Int))
+        centroid_fields.append(QgsField('strip_id', QVariant.Int))
+        centroid_fields.append(QgsField('photo_id', QVariant.Int))
         centroid_fields.append(QgsField('type', QVariant.String))
 
+        # Create Feature Sinks
         (sink_litchi, dest_id_litchi) = self.parameterAsSink(parameters, self.OUTPUT_LITCHI, context, litchi_fields, QgsWkbTypes.Point, wgs84)
         (sink_lines, dest_id_lines) = self.parameterAsSink(parameters, self.OUTPUT_LINES, context, line_fields, QgsWkbTypes.LineString, wgs84)
         (sink_cent, dest_id_cent) = self.parameterAsSink(parameters, self.OUTPUT_CENTROIDS, context, centroid_fields, QgsWkbTypes.Point, wgs84)
-
-        # Absolute Rotated (centered at cx, cy) check
-        # Our Xs, Ys are RELATIVE to cx, cy.
-        # But our x_min_constraint is ABSOLUTE in rotated space (because QgsGeometry.rotate does absolute rotation).
-        # We need to map relative xs to absolute rotated X to compare.
-        # Rotated Points are: (cx + rx', cy + ry') where we rotate (rx,ry) back? 
-        # Wait, QgsGeometry.rotate rotates A point P around Center C.
-        # P_new = C + R(P-C).
-        # Our grid construction: We defined a coordinate system (X', Y') aligned with rotated axes centered at C.
-        # So a point x_rel, y_rel (relative to C) IS (P-C) in the rotated frame.
-        # So its absolute coordinate in the Rotated Frame is C + (x_rel, y_rel).
-        # X_abs = cx + x_rel.
-        # Y_abs = cy + y_rel.
-        # Wait, rotating a geometry around C changes its coordinates. 
-        # If I have a point P that is (cx+10, cy) and I rotate geometry 90 deg around C.
-        # P becomes (cx, cy+10).
-        # So my 'rotated' coordinates (from the geom) are indeed centered at cx, cy roughly.
-        # BUT: BoundingBox.xMinimum() gives min X in that systems.
-        # Yes.
-        # However, `rotate` function might not align Local Axis X with Global X.
-        # It rotates the SHAPE against the fixed global axes.
-        # So if we rotate by `90 - Heading`, we are aligning the "Heading Axis" of the shape to be Horizontal (Global X).
-        # So checking X coordinates in this transformed state is checking position along the "Heading-Aligned" axis.
-        # And my `xs` loop corresponds to relative offsets along that same axis?
-        # Yes, because I built `xs` simply as a linear range.
-        # BUT I have to offset them by `cx` to compare with `x_min_constraint`!
-        # Because `x_min_constraint` is from an Absolute coordinate system.
-        
-        strips = {}
-        
+ 
+        # Grid loop variables
         strips = {}
         total_valid = 0
         total_distance_m = 0.0 # Accumulate total flight distance
@@ -421,6 +391,30 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         first_core = core_strips_data[0] # (y, pts)
         last_core = core_strips_data[-1]
         
+        # --- NEW LOGIC: Extend FIRST core strip before cloning ---
+        if first_core[1] and extra_photos_first_strip != 0:
+            f_x_min = first_core[1][0][0]
+            f_x_max = first_core[1][-1][0]
+            f_y = first_core[0]
+            
+            if extra_photos_first_strip < 0:
+                # Add to the BEGINNING (negative value)
+                num_photos = abs(extra_photos_first_strip)
+                new_start_pts = []
+                for k in range(num_photos, 0, -1):
+                    rx = f_x_min - (k * dist_between_photos)
+                    pw = rotated_rel_to_world(rx, f_y)
+                    new_start_pts.append((rx, f_y, pw))
+                first_core[1][0:0] = new_start_pts
+            else:
+                # Add to the END (positive value)
+                new_end_pts = []
+                for k in range(1, extra_photos_first_strip + 1):
+                    rx = f_x_max + (k * dist_between_photos)
+                    pw = rotated_rel_to_world(rx, f_y)
+                    new_end_pts.append((rx, f_y, pw))
+                first_core[1].extend(new_end_pts)
+        
         # 2. Generate Extra Start Strips (Clones of First Core)
         # We clone the X-structure of the first core strip.
         ref_pts = first_core[1]
@@ -446,6 +440,30 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         # 3. Add Core Strips
         for item in core_strips_data:
             final_strip_list.append(item[1])
+            
+        # --- NEW LOGIC: Extend last core strip before cloning ---
+        if last_core[1] and extra_photos_last_strip != 0:
+            last_x_min = last_core[1][0][0]
+            last_x_max = last_core[1][-1][0]
+            last_y = last_core[0]
+            
+            if extra_photos_last_strip < 0:
+                # Add to the BEGINNING (negative value)
+                num_photos = abs(extra_photos_last_strip)
+                new_start_pts = []
+                for k in range(num_photos, 0, -1):
+                    rx = last_x_min - (k * dist_between_photos)
+                    pw = rotated_rel_to_world(rx, last_y)
+                    new_start_pts.append((rx, last_y, pw))
+                last_core[1][0:0] = new_start_pts
+            else:
+                # Add to the END (positive value)
+                new_end_pts = []
+                for k in range(1, extra_photos_last_strip + 1):
+                    rx = last_x_max + (k * dist_between_photos)
+                    pw = rotated_rel_to_world(rx, last_y)
+                    new_end_pts.append((rx, last_y, pw))
+                last_core[1].extend(new_end_pts)
             
         # 4. Generate Extra End Strips (Clones of Last Core)
         ref_pts = last_core[1]
@@ -611,11 +629,7 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
             # Add End
             all_waypoints_data.append(create_wp(final_end_wgs, bearing_deg))
 
-            # Legacy sink support (Full Mission)
-            # ... we will output later from the list for consistency
-            
-            # Calculate Distance for Report
-            # ... same as before
+            # Calculate Distance for Report (Projected Metric)
             strip_len_proj = 0
             for i in range(len(final_centroids_list) - 1):
                 p1 = final_centroids_list[i]
@@ -630,17 +644,7 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
                 f.setGeometry(QgsGeometry.fromPolylineXY([final_start_wgs, final_end_wgs]))
                 f.setAttributes([strip_idx, 'Flight'])
                 sink_lines.addFeature(f, QgsFeatureSink.FastInsert)
-                
-                # OUTPUT CONNECTION LINE (Turn from previous end)
-                if previous_strip_end_wgs:
-                    # Connection Distance
-                    # Turn is from previous_strip_end_wgs (WGS84) to final_start_wgs (WGS84)
-                    # We need the Projected Distance to add to our total
-                    # Let's keep track of previous end in Projected CRS as well
-                    pass
 
-            
-            # Turn Distance Calculation
             if previous_strip_end_proj:
                 # Distance from prev end to current start
                 curr_start_proj = final_centroids_list[0]
@@ -657,24 +661,12 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
             previous_strip_end_proj = final_centroids_list[-1]
             reverse = not reverse
 
-        # POST-PROCESSING: OUTPUT LITCHI FROM COLLECTED LIST
-        # Column names for Litchi CSV (including actions if needed)
-        litchi_cols = [
-            'latitude', 'longitude', 'altitude(m)', 'heading(deg)', 'curvesize(m)',
-            'rotationdir', 'gimbalmode', 'gimbalpitchangle', 'altitudemode', 'speed(m/s)',
-            'poi_latitude', 'poi_longitude', 'poi_altitude(m)', 'poi_altitudemode',
-            'photo_timeinterval', 'photo_distinterval'
-        ]
-        if stop_and_shoot:
-            litchi_cols += ['actiontype1', 'actionparam1']
-        
         # Populate Sink (Full Mission)
         if sink_litchi:
             for wp_dict in all_waypoints_data:
                 f = QgsFeature()
                 f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(wp_dict['longitude'], wp_dict['latitude'])))
                 # Attributes must match litchi_fields defined earlier
-                # latitude, longitude, altitude, heading, curvesize, rot, gimb, pitch, altmode, speed, ...
                 attrs = [
                     wp_dict['latitude'], wp_dict['longitude'], wp_dict['altitude(m)'],
                     wp_dict['heading(deg)'], wp_dict['curvesize(m)'], wp_dict['rotationdir'],
@@ -746,11 +738,10 @@ class LitchiGeneratorAlgorithm(QgsProcessingAlgorithm):
         total_time_seconds = total_distance_m / speed
         total_time_min = total_time_seconds / 60.0
         
-        # Motion Blur Check
+        # 5. Safety & Motion Blur Check
         shutter_sec = 1.0 / shutter_denom
         motion_blur = speed * shutter_sec # Meters per exposure
         blur_status = "OK"
-        gsd_m = gsd_cm / 100.0
         if motion_blur > gsd_m:
             blur_status = "CRITICAL (Blur > GSD)"
         elif motion_blur > gsd_m / 2.0:

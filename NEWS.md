@@ -1,5 +1,23 @@
 # Flight Planner for Litchi Missions - Changelog
 
+## Version 0.1.2 (QGIS 4.0 Compatibility & Boundary Control) - 2026-05-11
+
+Maintenance and feature release focused on the transition to QGIS 4.0 and better control over mission boundaries.
+
+### New Features
+*   **QGIS 4.0 & Qt6 Compatibility**: Internal refactoring to support the latest QGIS major version and its transition to Qt6.
+*   **Boundary Extension Controls**: Added dedicated parameters to extend the first and last strips of the mission:
+    - **Extra Photos First Strip (N)**: Aligns the start of the mission with the terrain by extending the first core strip. Supports directional extension (Positive for end, Negative for beginning).
+    - **Extra Photos Last Strip (N)**: Ensures full coverage by extending the last core strip before cloning it into extra lines. Supports directional extension (Positive for end, Negative for beginning).
+*   **Workflow Optimization**:
+    - **Heading default**: Set to `0.0` for quicker mission setup.
+    - **Plugin Metadata**: Updated with `qgisMaximumVersion=4.99` to ensure visibility in QGIS 4.0.
+
+### Improvements
+*   **Compatibility**: Replaced `QMetaType` usage with `QVariant` for enhanced stability across different QGIS 3.x and 4.x versions.
+*   **User Interface**: Reordered parameters for a more logical workflow (extension controls grouped together).
+
+---
 ## Version 0.1.1 (Professional Optimization) - 2025-12-20
 
 Significant upgrade focusing on precision, safety, and workflow automation.
